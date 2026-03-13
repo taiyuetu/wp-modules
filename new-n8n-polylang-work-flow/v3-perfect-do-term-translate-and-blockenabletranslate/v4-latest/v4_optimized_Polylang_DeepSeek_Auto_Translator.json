@@ -1,5 +1,5 @@
 {
-  "name": "Polylang DeepSeek Auto Translator",
+  "name": "Polylang DeepSeek Auto Translator v2 (Optimized)",
   "nodes": [
     {
       "parameters": {
@@ -163,7 +163,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        960,
+        1100,
         -48
       ],
       "credentials": {
@@ -175,27 +175,27 @@
     },
     {
       "parameters": {
-        "jsCode": "const responses = $input.all();\nconst jobs = $('Flatten Post List').all();\n\nreturn responses.map((inputItem, index) => {\n  const payload = inputItem.json;\n  const job = jobs[index].json;\n\n  const bundle = {\n    title:   payload.translatable.title,\n    content: payload.translatable.content,\n    excerpt: payload.translatable.excerpt,\n    slug:    payload.translatable.slug,\n  };\n\n  const meta_to_translate = {};\n  for (const [key, info] of Object.entries(payload.meta || {})) {\n    if (info.translatable) {\n      const val = (info.type === 'json' || info.type === 'serialized')\n        ? JSON.stringify(info.raw_value)\n        : String(info.raw_value);\n      if (val && val.trim()) meta_to_translate[key] = val;\n    }\n  }\n\n  const acf_to_translate = {};\n  for (const [key, info] of Object.entries(payload.acf_fields || {})) {\n    if (info.translatable && info.value) {\n      acf_to_translate[key] = String(info.value);\n    }\n  }\n\n  const taxonomy_source_terms = {};\n  for (const [tax, terms] of Object.entries(payload.taxonomies || {})) {\n    taxonomy_source_terms[tax] = terms.map(t => ({\n      source_term_id: t.term_id,\n      translations: t.translations\n    }));\n  }\n\n  // ── Block segments: pass the FULL original text (with HTML) to DeepSeek.\n  // DeepSeek is instructed to preserve tags and only translate text nodes.\n  // On return, we do a direct string replace in the raw post_content.\n  const has_blocks = payload.has_blocks === true;\n  const block_segments = [];\n\n  if (has_blocks && payload.blocks?.segments?.length > 0) {\n    for (const seg of payload.blocks.segments) {\n      if (seg.text && seg.text.trim()) {\n        block_segments.push({\n          index:    seg.index,\n          sub_path: seg.sub_path,\n          is_html:  seg.is_html,\n          original: seg.text,   // exact string that exists in post_content\n        });\n      }\n    }\n  }\n\n  return {\n    json: {\n      ...job,\n      post_payload: payload,\n      bundle,\n      meta_to_translate,\n      acf_to_translate,\n      taxonomy_source_terms,\n      has_blocks,\n      block_segments,\n      block_original_content: has_blocks ? (payload.blocks?.original_content ?? null) : null,\n      target_lang: job.target_lang,\n      source_lang: payload.source_lang,\n    }\n  };\n});"
+        "jsCode": "const payload = $input.first().json.post_payload;\nconst job = $input.first().json;\n\nconst has_blocks = payload.has_blocks === true;\n\n// FIX: Don't send raw content for block posts — it was double-sent and discarded.\nconst bundle = {\n  title:   payload.translatable.title,\n  content: has_blocks ? undefined : payload.translatable.content,\n  excerpt: payload.translatable.excerpt,\n  slug:    payload.translatable.slug,\n};\n\nconst meta_to_translate = {};\nfor (const [key, info] of Object.entries(payload.meta || {})) {\n  if (info.translatable) {\n    const val = (info.type === 'json' || info.type === 'serialized')\n      ? JSON.stringify(info.raw_value)\n      : String(info.raw_value);\n    if (val && val.trim()) meta_to_translate[key] = val;\n  }\n}\n\nconst acf_to_translate = {};\nfor (const [key, info] of Object.entries(payload.acf_fields || {})) {\n  if (info.translatable && info.value) {\n    acf_to_translate[key] = String(info.value);\n  }\n}\n\nconst taxonomy_source_terms = {};\nfor (const [tax, terms] of Object.entries(payload.taxonomies || {})) {\n  taxonomy_source_terms[tax] = terms.map(t => ({\n    source_term_id: t.term_id,\n    translations: t.translations\n  }));\n}\n\nconst block_segments = [];\nif (has_blocks && payload.blocks?.segments?.length > 0) {\n  for (const seg of payload.blocks.segments) {\n    if (seg.text && seg.text.trim()) {\n      block_segments.push({\n        index:    seg.index,\n        is_html:  seg.is_html,\n        original: seg.text,\n      });\n    }\n  }\n}\n\nreturn [{\n  json: {\n    ...job,\n    post_payload: payload,\n    bundle,\n    meta_to_translate,\n    acf_to_translate,\n    taxonomy_source_terms,\n    has_blocks,\n    block_segments,\n    block_original_content: has_blocks ? (payload.blocks?.original_content ?? null) : null,\n    target_lang: job.target_lang,\n    source_lang: job.source_lang || payload.source_lang,\n  }\n}];"
       },
       "id": "8df2a8f5-25c7-43cf-a8af-88edee09ead0",
       "name": "Build Translation Bundle",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1168,
+        1460,
         -48
       ]
     },
     {
       "parameters": {
-        "jsCode": "// ── Prepare DeepSeek Request — with chunking for large posts ──\n// Rough token estimator: ~1 token per 4 chars for mixed content.\nfunction estimateTokens(str) { return Math.ceil((str || '').length / 4); }\n\nfunction decodeUnicodeEscapes(str) {\n  if (typeof str !== 'string') return str;\n  return str.replace(/\\\\u([0-9a-fA-F]{4})/g, (_, hex) =>\n    String.fromCharCode(parseInt(hex, 16))\n  );\n}\n\nconst MAX_BLOCK_TOKENS_PER_CALL = 6000; // safe limit per chunk\n\nconst results = [];\n\nfor (const inputItem of $input.all()) {\n  const item = inputItem.json;\n  const target_lang = item.target_lang;\n  const source_lang = item.source_lang;\n\n  const system_prompt = `You are a professional multilingual content translator for a WordPress website.\nYou will receive a JSON object with text fields to translate from ${source_lang} to ${target_lang}.\nRules:\n1. Translate EVERY field value accurately and naturally.\n2. For HTML strings: preserve ALL HTML tags exactly as-is — only translate the visible text between the tags.\n3. For the \"slug\" field: output a URL-friendly lowercase string (hyphens, no spaces, no special chars).\n4. Return ONLY valid JSON. No markdown fences, no explanations, no extra keys.\n5. Keep every JSON key exactly as given.\n6. For the \"blocks\" array: each item has an \"index\" and \"original\". Return the same array with a \"translated\" key containing the fully translated string (HTML tags preserved). Never omit any block item.\n7. IMPORTANT: Make sure the output JSON is COMPLETE. Do NOT truncate.`;\n\n  // Build the blocks array\n  const all_blocks = (item.block_segments || []).map(seg => ({\n    index:    seg.index,\n    sub_path: seg.sub_path,\n    original: decodeUnicodeEscapes(seg.original),\n  }));\n\n  // Estimate total tokens for blocks\n  const totalBlockTokens = all_blocks.reduce((sum, b) => sum + estimateTokens(b.original) * 2.5, 0);\n  const corePayload = { core: item.bundle, meta: item.meta_to_translate, acf: item.acf_to_translate };\n  const coreTokens = estimateTokens(JSON.stringify(corePayload));\n\n  // If small enough, send as one request (original behaviour)\n  if (totalBlockTokens + coreTokens < MAX_BLOCK_TOKENS_PER_CALL) {\n    const payload_to_translate = { ...corePayload, blocks: all_blocks };\n    const user_prompt = `Translate from ${source_lang} to ${target_lang}. Return ONLY the JSON:\\n${JSON.stringify(payload_to_translate, null, 2)}`;\n    results.push({\n      json: {\n        ...item,\n        _chunked: false,\n        _chunk_index: 0,\n        _total_chunks: 1,\n        deepseek_request: {\n          model:       item.deepseek_model,\n          max_tokens:  8192,\n          temperature: 0.2,\n          messages: [\n            { role: 'system', content: system_prompt },\n            { role: 'user',   content: user_prompt },\n          ]\n        }\n      }\n    });\n  } else {\n    // ── CHUNKING: split blocks into smaller batches ──\n    const chunks = [];\n    let currentChunk = [];\n    let currentTokens = 0;\n    for (const block of all_blocks) {\n      const blockTokens = estimateTokens(block.original) * 2.5;\n      if (currentChunk.length > 0 && currentTokens + blockTokens > MAX_BLOCK_TOKENS_PER_CALL) {\n        chunks.push(currentChunk);\n        currentChunk = [];\n        currentTokens = 0;\n      }\n      currentChunk.push(block);\n      currentTokens += blockTokens;\n    }\n    if (currentChunk.length > 0) chunks.push(currentChunk);\n\n    // First chunk includes core/meta/acf; remaining chunks only have blocks\n    for (let ci = 0; ci < chunks.length; ci++) {\n      const payload = ci === 0\n        ? { ...corePayload, blocks: chunks[ci] }\n        : { blocks: chunks[ci] };\n      const prompt_prefix = ci === 0\n        ? `Translate from ${source_lang} to ${target_lang}. Return ONLY the JSON:`\n        : `Continue translating blocks from ${source_lang} to ${target_lang}. Return ONLY the JSON with a \"blocks\" array:`;\n      const user_prompt = `${prompt_prefix}\\n${JSON.stringify(payload, null, 2)}`;\n      results.push({\n        json: {\n          ...item,\n          _chunked: true,\n          _chunk_index: ci,\n          _total_chunks: chunks.length,\n          _chunk_block_indices: chunks[ci].map(b => b.index),\n          deepseek_request: {\n            model:       item.deepseek_model,\n            max_tokens:  8192,\n            temperature: 0.2,\n            messages: [\n              { role: 'system', content: system_prompt },\n              { role: 'user',   content: user_prompt },\n            ]\n          }\n        }\n      });\n    }\n  }\n}\n\nreturn results;"
+        "jsCode": "// Optimized: compact JSON, no sub_path, chunk limit raised to 25K\nfunction estimateTokens(str) { return Math.ceil((str || '').length / 4); }\n\nfunction decodeUnicodeEscapes(str) {\n  if (typeof str !== 'string') return str;\n  return str.replace(/\\\\u([0-9a-fA-F]{4})/g, (_, hex) =>\n    String.fromCharCode(parseInt(hex, 16))\n  );\n}\n\nconst MAX_BLOCK_TOKENS_PER_CALL = 25000;\nconst results = [];\n\nfor (const inputItem of $input.all()) {\n  const item = inputItem.json;\n  const target_lang = item.target_lang;\n  const source_lang = item.source_lang;\n\n  const system_prompt = `You are a professional multilingual content translator for a WordPress website.\nYou will receive a JSON object with text fields to translate from ${source_lang} to ${target_lang}.\nRules:\n1. Translate EVERY field value accurately and naturally.\n2. For HTML strings: preserve ALL HTML tags exactly as-is — only translate the visible text between the tags.\n3. For the \"slug\" field: output a URL-friendly lowercase string (hyphens, no spaces, no special chars).\n4. Return ONLY valid JSON. No markdown fences, no explanations, no extra keys.\n5. Keep every JSON key exactly as given.\n6. For the \"blocks\" array: each item has an \"index\" and \"original\". Return the same array with a \"translated\" key containing the fully translated string (HTML tags preserved). Never omit any block item.\n7. IMPORTANT: Make sure the output JSON is COMPLETE. Do NOT truncate.`;\n\n  // FIX: only send index + original (no sub_path) to save tokens\n  const all_blocks = (item.block_segments || []).map(seg => ({\n    index:    seg.index,\n    original: decodeUnicodeEscapes(seg.original),\n  }));\n\n  const totalBlockTokens = all_blocks.reduce((sum, b) => sum + estimateTokens(b.original) * 2.5, 0);\n  const corePayload = { core: item.bundle, meta: item.meta_to_translate, acf: item.acf_to_translate };\n  const coreTokens = estimateTokens(JSON.stringify(corePayload));\n\n  if (totalBlockTokens + coreTokens < MAX_BLOCK_TOKENS_PER_CALL) {\n    const payload_to_translate = { ...corePayload, blocks: all_blocks };\n    // FIX: compact JSON — no pretty-printing\n    const user_prompt = `Translate from ${source_lang} to ${target_lang}. Return ONLY the JSON:\\n${JSON.stringify(payload_to_translate)}`;\n    results.push({\n      json: {\n        ...item,\n        _chunked: false,\n        _chunk_index: 0,\n        _total_chunks: 1,\n        deepseek_request: {\n          model: item.deepseek_model,\n          max_tokens: 16384,\n          temperature: 0.2,\n          messages: [\n            { role: 'system', content: system_prompt },\n            { role: 'user',   content: user_prompt },\n          ]\n        }\n      }\n    });\n  } else {\n    const chunks = [];\n    let currentChunk = [];\n    let currentTokens = 0;\n    for (const block of all_blocks) {\n      const blockTokens = estimateTokens(block.original) * 2.5;\n      if (currentChunk.length > 0 && currentTokens + blockTokens > MAX_BLOCK_TOKENS_PER_CALL) {\n        chunks.push(currentChunk);\n        currentChunk = [];\n        currentTokens = 0;\n      }\n      currentChunk.push(block);\n      currentTokens += blockTokens;\n    }\n    if (currentChunk.length > 0) chunks.push(currentChunk);\n\n    for (let ci = 0; ci < chunks.length; ci++) {\n      const payload = ci === 0\n        ? { ...corePayload, blocks: chunks[ci] }\n        : { blocks: chunks[ci] };\n      const prompt_prefix = ci === 0\n        ? `Translate from ${source_lang} to ${target_lang}. Return ONLY the JSON:`\n        : `Continue translating blocks from ${source_lang} to ${target_lang}. Return ONLY the JSON with a \"blocks\" array:`;\n      const user_prompt = `${prompt_prefix}\\n${JSON.stringify(payload)}`;\n      results.push({\n        json: {\n          ...item,\n          _chunked: true,\n          _chunk_index: ci,\n          _total_chunks: chunks.length,\n          _chunk_block_indices: chunks[ci].map(b => b.index),\n          deepseek_request: {\n            model: item.deepseek_model,\n            max_tokens: 16384,\n            temperature: 0.2,\n            messages: [\n              { role: 'system', content: system_prompt },\n              { role: 'user',   content: user_prompt },\n            ]\n          }\n        }\n      });\n    }\n  }\n}\n\nreturn results;"
       },
       "id": "26228e55-3cbf-41d0-bc0d-90f3f467895c",
       "name": "Prepare DeepSeek Request",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1392,
+        1640,
         -48
       ]
     },
@@ -217,7 +217,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        1616,
+        1840,
         -48
       ],
       "credentials": {
@@ -236,7 +236,7 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1840,
+        2040,
         -48
       ]
     },
@@ -256,7 +256,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        2048,
+        2240,
         -48
       ],
       "credentials": {
@@ -275,34 +275,23 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2272,
+        2440,
         -48
       ]
     },
     {
       "parameters": {
-        "amount": 2
+        "amount": 3
       },
       "id": "e128a500-8a8b-491a-b786-2288f3f01a35",
       "name": "Rate Limit Delay",
       "type": "n8n-nodes-base.wait",
       "typeVersion": 1.1,
       "position": [
-        2496,
+        2640,
         -48
       ],
       "webhookId": "ec5aec34-5504-462a-abb6-ecf572860597"
-    },
-    {
-      "parameters": {},
-      "id": "5db59442-064f-4de8-8ed9-f8c8a38eb97f",
-      "name": "Trigger Term Branch",
-      "type": "n8n-nodes-base.noOp",
-      "typeVersion": 1,
-      "position": [
-        48,
-        272
-      ]
     },
     {
       "parameters": {
@@ -311,7 +300,7 @@
             {
               "id": "1d84e5f6-28a6-48a2-b69a-fbd7e712edb0",
               "name": "wp_base_url",
-              "value": "https://poeticballoon.xyz//wp-json/pll-translate/v1",
+              "value": "https://poeticballoon.xyz/wp-json/pll-translate/v1",
               "type": "string"
             },
             {
@@ -420,7 +409,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        928,
+        1080,
         272
       ],
       "credentials": {
@@ -432,14 +421,14 @@
     },
     {
       "parameters": {
-        "jsCode": "return $input.all().map(inputItem => {\n  const d = inputItem.json;  // fully merged item from Merge Term Payload\n\n  const system_prompt = `You are a professional multilingual WordPress taxonomy translator.\nTranslate the provided JSON from ${d.source_lang} to ${d.target_lang}.\nRules:\n1. Translate name and description naturally.\n2. For 'slug': produce a URL-friendly lowercase hyphenated version.\n3. Translate all meta text values.\n4. Return ONLY the translated JSON — no markdown, no explanation.`;\n\n  const to_translate = { core: d.term_payload.translatable, meta: {} };\n\n  for (const [key, info] of Object.entries(d.term_payload.meta || {})) {\n    if (info.translatable && info.raw_value) {\n      to_translate.meta[key] = String(info.raw_value);\n    }\n  }\n\n  return {\n    json: {\n      // Carry all job context forward so Merge DS Term Response can re-attach it\n      term_id:         d.term_id,\n      taxonomy:        d.taxonomy,\n      source_lang:     d.source_lang,\n      target_lang:     d.target_lang,\n      wp_base_url:     d.wp_base_url,\n      deepseek_api_url: d.deepseek_api_url,\n      deepseek_model:  d.deepseek_model,\n      term_payload:    d.term_payload,\n      deepseek_request: {\n        model:       d.deepseek_model,\n        max_tokens:  2048,\n        temperature: 0.2,\n        messages: [\n          { role: 'system', content: system_prompt },\n          { role: 'user',   content: `Translate this JSON from ${d.source_lang} to ${d.target_lang}:\\n${JSON.stringify(to_translate, null, 2)}` }\n        ]\n      }\n    }\n  };\n});"
+        "jsCode": "return $input.all().map(inputItem => {\n  const d = inputItem.json;  // fully merged item from Merge Term Payload\n\n  const system_prompt = `You are a professional multilingual WordPress taxonomy translator.\nTranslate the provided JSON from ${d.source_lang} to ${d.target_lang}.\nRules:\n1. Translate name and description naturally.\n2. For 'slug': produce a URL-friendly lowercase hyphenated version.\n3. Translate all meta text values.\n4. Return ONLY the translated JSON — no markdown, no explanation.`;\n\n  const to_translate = { core: d.term_payload.translatable, meta: {} };\n\n  for (const [key, info] of Object.entries(d.term_payload.meta || {})) {\n    if (info.translatable && info.raw_value) {\n      to_translate.meta[key] = String(info.raw_value);\n    }\n  }\n\n  return {\n    json: {\n      // Carry all job context forward so Merge DS Term Response can re-attach it\n      term_id:         d.term_id,\n      taxonomy:        d.taxonomy,\n      source_lang:     d.source_lang,\n      target_lang:     d.target_lang,\n      wp_base_url:     d.wp_base_url,\n      deepseek_api_url: d.deepseek_api_url,\n      deepseek_model:  d.deepseek_model,\n      term_payload:    d.term_payload,\n      deepseek_request: {\n        model:       d.deepseek_model,\n        max_tokens:  2048,\n        temperature: 0.2,\n        messages: [\n          { role: 'system', content: system_prompt },\n          { role: 'user',   content: `Translate this JSON from ${d.source_lang} to ${d.target_lang}:\\n${JSON.stringify(to_translate)}` }\n        ]\n      }\n    }\n  };\n});"
       },
       "id": "9c96f80e-f840-408b-a7e2-6fe39740989d",
       "name": "Prepare Term DeepSeek Request",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1376,
+        1440,
         272
       ]
     },
@@ -461,7 +450,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        1600,
+        1640,
         272
       ],
       "credentials": {
@@ -480,7 +469,7 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1824,
+        2000,
         272
       ]
     },
@@ -500,7 +489,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        2032,
+        2180,
         272
       ],
       "credentials": {
@@ -519,20 +508,20 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2256,
+        2360,
         272
       ]
     },
     {
       "parameters": {
-        "amount": 1
+        "amount": 2
       },
       "id": "74db825a-6af1-4163-884f-5461dfdf0502",
       "name": "Term Rate Limit Delay",
       "type": "n8n-nodes-base.wait",
       "typeVersion": 1.1,
       "position": [
-        2480,
+        2540,
         272
       ],
       "webhookId": "9e4ec53c-e2ab-46bd-993a-9893b045d198"
@@ -569,11 +558,11 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1040,
+        1260,
         272
       ],
       "parameters": {
-        "jsCode": "// Merge the GET Term Payload HTTP response with job context from Flatten Term List.\n// HTTP nodes replace the item entirely, so we re-attach job fields here by index.\nconst payloads  = $input.all();\nconst jobItems  = $('Flatten Term List').all();\n\nreturn payloads.map((inputItem, index) => {\n  const payload = inputItem.json;          // raw HTTP response from GET Term Payload\n  const job     = jobItems[index].json;    // matching job from Flatten Term List\n\n  return {\n    json: {\n      term_payload:      payload,           // full payload from PHP endpoint\n      term_id:           job.term_id,\n      taxonomy:          job.taxonomy,\n      source_lang:       job.source_lang,\n      target_lang:       job.target_lang,\n      wp_base_url:       job.wp_base_url,\n      deepseek_api_url:  job.deepseek_api_url,\n      deepseek_model:    job.deepseek_model,\n    }\n  };\n});"
+        "jsCode": "// Merge GET Term Payload HTTP response with job context from SplitInBatches.\nconst payloads = $input.all();\nconst jobItems = $('Split Term Batches').all();\n\nreturn payloads.map((inputItem, index) => {\n  const payload = inputItem.json;\n  const job = jobItems[index].json;\n  return {\n    json: {\n      term_payload:      payload,\n      term_id:           job.term_id,\n      taxonomy:          job.taxonomy,\n      source_lang:       job.source_lang,\n      target_lang:       job.target_lang,\n      wp_base_url:       job.wp_base_url,\n      deepseek_api_url:  job.deepseek_api_url,\n      deepseek_model:    job.deepseek_model,\n    }\n  };\n});"
       }
     },
     {
@@ -582,12 +571,53 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1488,
+        1820,
         272
       ],
       "parameters": {
         "jsCode": "// Merge the DeepSeek HTTP response with job context from Prepare Term DeepSeek Request.\n// HTTP nodes replace the item entirely, so we re-attach job fields here by index.\nconst dsResponses = $input.all();\nconst reqItems    = $('Prepare Term DeepSeek Request').all();\n\nreturn dsResponses.map((inputItem, index) => {\n  const ds_resp = inputItem.json;        // raw DeepSeek API response\n  const req     = reqItems[index].json;  // matching prepared request item\n\n  return {\n    json: {\n      // DeepSeek response fields\n      choices:         ds_resp.choices,\n      // Job context carried forward\n      term_id:         req.term_id,\n      taxonomy:        req.taxonomy,\n      source_lang:     req.source_lang,\n      target_lang:     req.target_lang,\n      wp_base_url:     req.wp_base_url,\n      deepseek_model:  req.deepseek_model,\n      // Fallback values in case translation fails\n      fallback_name:        req.term_payload?.translatable?.name        || '',\n      fallback_description: req.term_payload?.translatable?.description || '',\n      fallback_slug:        req.term_payload?.translatable?.slug        || '',\n    }\n  };\n});"
       }
+    },
+    {
+      "parameters": {
+        "batchSize": 5,
+        "options": {}
+      },
+      "id": "a0a0a0a0-b1b1-c2c2-d3d3-e4e4e4e4e4e0",
+      "name": "Split Post Batches",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        920,
+        -48
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Re-attach job context from the SplitInBatches output after HTTP Request replaced item data.\nconst payloads = $input.all();\nconst jobItems = $('Split Post Batches').all();\n\nreturn payloads.map((inputItem, index) => {\n  const payload = inputItem.json;\n  const job = jobItems[index].json;\n  return {\n    json: {\n      post_payload: payload,\n      post_id: job.post_id,\n      post_type: job.post_type,\n      source_lang: job.source_lang,\n      target_lang: job.target_lang,\n      wp_base_url: job.wp_base_url,\n      deepseek_api_url: job.deepseek_api_url,\n      deepseek_model: job.deepseek_model,\n    }\n  };\n});"
+      },
+      "id": "a0a0a0a0-b1b1-c2c2-d3d3-e4e4e4e4e4e1",
+      "name": "Merge Post Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1280,
+        -48
+      ]
+    },
+    {
+      "parameters": {
+        "batchSize": 10,
+        "options": {}
+      },
+      "id": "a0a0a0a0-b1b1-c2c2-d3d3-e4e4e4e4e4e2",
+      "name": "Split Term Batches",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        900,
+        272
+      ]
     }
   ],
   "pinData": {},
@@ -597,6 +627,11 @@
         [
           {
             "node": "Config Variables",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Term Config Variables",
             "type": "main",
             "index": 0
           }
@@ -651,7 +686,7 @@
       "main": [
         [
           {
-            "node": "GET Post Payload",
+            "node": "Split Post Batches",
             "type": "main",
             "index": 0
           }
@@ -662,7 +697,7 @@
       "main": [
         [
           {
-            "node": "Build Translation Bundle",
+            "node": "Merge Post Payload",
             "type": "main",
             "index": 0
           }
@@ -772,7 +807,7 @@
       "main": [
         [
           {
-            "node": "GET Term Payload",
+            "node": "Split Term Batches",
             "type": "main",
             "index": 0
           }
@@ -877,6 +912,61 @@
           }
         ]
       ]
+    },
+    "Split Post Batches": {
+      "main": [
+        [
+          {
+            "node": "GET Post Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Post Payload": {
+      "main": [
+        [
+          {
+            "node": "Build Translation Bundle",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rate Limit Delay": {
+      "main": [
+        [
+          {
+            "node": "Split Post Batches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Term Batches": {
+      "main": [
+        [
+          {
+            "node": "GET Term Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Term Rate Limit Delay": {
+      "main": [
+        [
+          {
+            "node": "Split Term Batches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
   "active": false,
@@ -885,7 +975,7 @@
     "binaryMode": "separate",
     "availableInMCP": false
   },
-  "versionId": "c53d150a-b542-498c-9848-2eeca3b24fd1",
+  "versionId": "d64e261a-c653-5a9d-a959-3ffca4c35da2",
   "meta": {
     "instanceId": "865db4d91557f97576bf1be1eddc72b870745dd67b7c1943b20b23b1d725bc23"
   },
