@@ -676,6 +676,8 @@ function taiyuetu_invalidate_url_caches($term_id = 0, $tt_id = 0, $taxonomy = ''
 {
     // Clear the term slug map transient
     delete_transient('taiyuetu_term_slug_map');
+    // Clear cached conflict notices so resolved conflicts disappear immediately
+    delete_transient('taiyuetu_slug_conflicts');
 
     // Set flag to flush rewrite rules on next admin page load
     update_option('taiyuetu_clean_url_flush_needed', 'yes', false); // autoload = false
@@ -703,6 +705,10 @@ add_action('permalink_structure_changed', 'taiyuetu_invalidate_on_permalink_chan
  */
 function taiyuetu_invalidate_on_post_change($new_status, $old_status, $post)
 {
+    // Conflicts can involve pages and other published content slugs, so always clear
+    // conflict cache when publish state changes.
+    delete_transient('taiyuetu_slug_conflicts');
+
     // Only care about status transitions involving 'publish'
     if ($new_status === 'publish' || $old_status === 'publish') {
         $clean_post_types = taiyuetu_get_clean_url_post_types();
@@ -743,6 +749,21 @@ add_action('after_switch_theme', 'taiyuetu_flush_on_theme_switch');
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
+ * Build a deterministic signature for the current conflict set.
+ *
+ * @param string[] $conflicts Conflict messages.
+ * @return string
+ */
+function taiyuetu_get_slug_conflicts_signature($conflicts)
+{
+    if (empty($conflicts) || !is_array($conflicts)) {
+        return '';
+    }
+
+    return md5(wp_json_encode(array_values($conflicts)));
+}
+
+/**
  * Display admin notice when slug conflicts are detected.
  * Only checks on taxonomy and post edit screens for performance.
  */
@@ -764,7 +785,16 @@ function taiyuetu_slug_conflict_admin_notice()
         return;
     }
 
-    echo '<div class="notice notice-warning is-dismissible">';
+    $signature = taiyuetu_get_slug_conflicts_signature($conflicts);
+    $user_id = get_current_user_id();
+    $dismissed_signature = $user_id ? get_user_meta($user_id, 'taiyuetu_dismissed_slug_conflicts_signature', true) : '';
+
+    // Keep notice hidden for this user until conflict content changes.
+    if (!empty($signature) && hash_equals((string) $dismissed_signature, (string) $signature)) {
+        return;
+    }
+
+    echo '<div class="notice notice-warning is-dismissible taiyuetu-slug-conflict-notice" data-signature="' . esc_attr($signature) . '" data-nonce="' . esc_attr(wp_create_nonce('taiyuetu_dismiss_slug_conflicts_notice')) . '">';
     echo '<p><strong>' . esc_html__('Clean URL Rewriter: Potential slug conflicts detected:', 'taiyuetu') . '</strong></p>';
     echo '<ul style="list-style: disc; padding-left: 20px;">';
     foreach ($conflicts as $conflict) {
@@ -773,8 +803,50 @@ function taiyuetu_slug_conflict_admin_notice()
     echo '</ul>';
     echo '<p>' . esc_html__('Conflicting URLs will retain their original structure to prevent errors.', 'taiyuetu') . '</p>';
     echo '</div>';
+    ?>
+    <script>
+        (function ($) {
+            $(document).on('click', '.taiyuetu-slug-conflict-notice .notice-dismiss', function () {
+                var $notice = $(this).closest('.taiyuetu-slug-conflict-notice');
+                var signature = $notice.data('signature');
+                var nonce = $notice.data('nonce');
+                if (!signature || !nonce || typeof ajaxurl === 'undefined') {
+                    return;
+                }
+
+                $.post(ajaxurl, {
+                    action: 'taiyuetu_dismiss_slug_conflicts_notice',
+                    signature: signature,
+                    nonce: nonce
+                });
+            });
+        })(jQuery);
+    </script>
+    <?php
 }
 add_action('admin_notices', 'taiyuetu_slug_conflict_admin_notice');
+
+/**
+ * Persist admin notice dismissal for current user until conflicts change.
+ */
+function taiyuetu_dismiss_slug_conflicts_notice()
+{
+    if (!current_user_can('manage_options')) {
+        wp_send_json_error(array('message' => 'Unauthorized'), 403);
+    }
+
+    check_ajax_referer('taiyuetu_dismiss_slug_conflicts_notice', 'nonce');
+
+    $signature = sanitize_text_field(wp_unslash($_POST['signature'] ?? ''));
+    $user_id = get_current_user_id();
+    if (!$user_id || empty($signature)) {
+        wp_send_json_error(array('message' => 'Invalid request'), 400);
+    }
+
+    update_user_meta($user_id, 'taiyuetu_dismissed_slug_conflicts_signature', $signature);
+    wp_send_json_success();
+}
+add_action('wp_ajax_taiyuetu_dismiss_slug_conflicts_notice', 'taiyuetu_dismiss_slug_conflicts_notice');
 
 /**
  * Detect slug conflicts between taxonomy terms, pages, and CPT posts.
