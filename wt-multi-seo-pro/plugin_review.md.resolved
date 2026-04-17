@@ -1,0 +1,242 @@
+# WT Multi SEO Pro — Code Review
+
+## Overview
+
+The plugin is well-structured: singleton pattern throughout, clear file separation, good use of WordPress hooks, PHP 8.0+ features, and consistent escaping. Overall the code quality is **solid**, but there are several **bugs, incomplete stubs, and minor security/performance issues** that should be addressed before the plugin runs in production.
+
+---
+
+## 🔴 Bugs / Broken Functionality
+
+### 1. `PLSEO_Sitemap::maybe_flush()` — Flushes on *every* `save_post`
+**File:** [includes/class-plseo-sitemap.php](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/includes/class-plseo-sitemap.php) · line 466–468
+
+```php
+// Current (bad)
+public function maybe_flush(): void {
+    flush_rewrite_rules();
+}
+```
+
+`flush_rewrite_rules()` is expensive and should almost never be called on `save_post` (runs every autosave, every revision, every quick-edit). It only needs to run when rewrite rules actually change (activation / deactivation). Remove this hook or replace with a smarter condition.
+
+```php
+// Better: remove the hook entirely from __construct, or guard it:
+public function maybe_flush(): void {
+    // Only flush when the sitemap rewrite rule isn't already registered
+    global $wp_rewrite;
+    if ( empty( $wp_rewrite->extra_rules_top['sitemap\\.xml$'] ) ) {
+        flush_rewrite_rules();
+    }
+}
+```
+
+---
+
+### 2. `PLSEO_Redirects::handle_old_slug_redirect()` — Empty Stub
+**File:** [includes/class-plseo-redirects.php](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/includes/class-plseo-redirects.php) · line 26–28
+
+The method is registered as a `redirect_canonical` filter but just returns `$redirect_url` unchanged — it does nothing beyond what WordPress already does natively. If the `redirect_old_slugs` option is enabled by default (`true`), users expect this to work.
+
+Either implement the logic (check `_wp_old_slug` post meta and redirect) or remove the option/hook until it's ready.
+
+---
+
+### 3. `PLSEO_Schema::add_local_business_to_graph()` — Empty Stub
+**File:** [includes/class-plseo-schema.php](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/includes/class-plseo-schema.php) · line 225
+
+```php
+private function add_local_business_to_graph(): void { /* Logic */ }
+```
+
+The admin UI has full Local Business fields (type, address, phone, hours) and the option `schema_local_business` can be enabled — but the method that outputs the schema is completely empty. This will silently produce no output when the feature is on.
+
+---
+
+### 4. [PLSEO_Schema](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/includes/class-plseo-schema.php#8-227) — `$graph` is instance state but class is a singleton instantiated once per request
+**File:** [includes/class-plseo-schema.php](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/includes/class-plseo-schema.php) · lines 11, 82
+
+The `$graph` array is populated in [output_schema()](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/includes/class-plseo-schema.php#33-94) (called from `wp_head`), and `array_filter` removes falsy entries. This means a `null` logo or empty `sameAs` array on the Organization node can leave those keys in, because `array_filter` only works on the top level. NULL logo and empty array will remain in the JSON-LD output:
+
+```json
+"logo": null,
+"sameAs": []
+```
+
+Fix by removing nulls recursively or filtering before assignment:
+
+```php
+$this->graph['organization'] = array_filter([
+    ...
+    'logo'   => $logo ? [...] : null,
+    'sameAs' => array_filter([...]),
+]);
+```
+
+---
+
+### 5. [PLSEO_OpenGraph](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/includes/class-plseo-opengraph.php#4-109) — `article:published_time` / `article:modified_time` always output for *all* singulars
+**File:** [includes/class-plseo-opengraph.php](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/includes/class-plseo-opengraph.php) · line 82–83
+
+```php
+$tags['article:published_time'] = get_post_time( 'c', true, $post_id );
+$tags['article:modified_time']  = get_post_modified_time( 'c', true, $post_id );
+```
+
+These are output even when `og:type` is [website](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/includes/class-plseo-schema.php#119-128) (pages, CPTs). Article meta properties are only valid when `og:type = article`. Guard them:
+
+```php
+if ( is_singular( 'post' ) ) {
+    $tags['article:published_time'] = get_post_time( 'c', true, $post_id );
+    $tags['article:modified_time']  = get_post_modified_time( 'c', true, $post_id );
+}
+```
+
+---
+
+### 6. `PLSEO_Helpers::get_post_seo_meta()` — Fallback may return wrong-language meta
+**File:** [includes/class-plseo-helpers.php](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/includes/class-plseo-helpers.php) · line 55–70
+
+When a translated post has no SEO meta, the helper falls back to the **default language** post's meta. This is intentional per the comment, but it can cause the wrong language title/description to appear in `<head>` if a user clears the field on a translation without setting new values. Consider making this opt-in or at least documenting it clearly with a filter:
+
+```php
+$value = apply_filters( 'plseo_post_seo_meta_fallback', $value, $post_id, $key, $default_id );
+```
+
+---
+
+### 7. `PLSEO_Breadcrumbs::add_breadcrumb_to_graph()` — `get_permalink()` with no argument
+**File:** [includes/class-plseo-schema.php](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/includes/class-plseo-schema.php) · line 215
+
+```php
+'@id' => get_permalink() . '#breadcrumb',
+```
+
+`get_permalink()` without an argument depends on the current post being in The Loop. This is called from `wp_head` (outside the loop on archive/home pages), which will return `false` and produce `#breadcrumb` as the ID. Use the canonical URL instead:
+
+```php
+'@id' => PLSEO_Canonical::get_instance()->get_canonical_url() . '#breadcrumb',
+```
+
+---
+
+## 🟡 Security Notes
+
+### 8. [save_fields](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/admin/class-plseo-taxonomy-meta.php#127-141) — Missing `wp_unslash()` on term meta
+**File:** [admin/class-plseo-taxonomy-meta.php](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/admin/class-plseo-taxonomy-meta.php) · lines 133–139
+
+```php
+update_term_meta( $term_id, '_plseo_meta_title', sanitize_text_field( $_POST['_plseo_meta_title'] ) );
+```
+
+`$_POST` values should be unslashed before sanitizing:
+
+```php
+update_term_meta( $term_id, '_plseo_meta_title',
+    sanitize_text_field( wp_unslash( $_POST['_plseo_meta_title'] ) )
+);
+```
+
+---
+
+### 9. [render_tools_page](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/admin/class-plseo-admin.php#126-159) — Missing wrapping div close
+**File:** [admin/class-plseo-admin.php](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/admin/class-plseo-admin.php) · line 156
+
+There is a stray `</div>` on line 156 that closes a `<div>` that was never opened in [render_tools_page](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/admin/class-plseo-admin.php#126-159). This likely relies on [header.php](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/header.php) opening a container that it shouldn't have to.
+
+---
+
+## 🟠 Performance Issues
+
+### 10. [PLSEO_Columns](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/admin/class-plseo-columns.php#4-55) — Multiple `get_post_meta()` calls per row, no caching
+**File:** [admin/class-plseo-columns.php](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/admin/class-plseo-columns.php)
+
+Three separate `get_post_meta()` calls fire per row in the posts list. WordPress does warm the meta cache for listed posts, so this is fine in practice — but worth flagging as a pattern to watch.
+
+---
+
+### 11. [PLSEO_Sitemap](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/includes/class-plseo-sitemap.php#14-485) — [get_post_images()](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/includes/class-plseo-sitemap.php#396-437) runs `preg_match_all` on raw post content
+**File:** [includes/class-plseo-sitemap.php](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/includes/class-plseo-sitemap.php) · line 415
+
+This regex runs against un-filtered post content. For large sites with block editor content, running regex over potentially hundreds of posts on each sitemap request adds up. Consider caching image results in a transient per post ID, or limiting further.
+
+---
+
+## 🔵 Missing Features / Improvements
+
+### 12. `PLSEO_Options::sanitize_option()` — Generic callback for all options
+**File:** [includes/class-plseo-options.php](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/includes/class-plseo-options.php) · line 135
+
+The [sanitize_option](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/includes/class-plseo-options.php#132-144) callback is a single generic function registered for every option, but it doesn't know *which* option it's being called for. This means URL options (like `og_default_image`) are sanitized with `sanitize_text_field` instead of `esc_url_raw` — but those options are only saved through `PLSEO_Admin::save_settings()` which does type-aware sanitization. The [register_setting](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/includes/class-plseo-options.php#112-131) callback path (REST API / [options.php](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/includes/class-plseo-options.php) direct post) would miss the URL sanitization.
+
+Fix: use a per-option sanitize closure that matches the type, or consolidate to just one save path.
+
+---
+
+### 13. No `noindex_empty_taxonomy` enforcement at runtime
+**File:** [includes/class-plseo-meta.php](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/includes/class-plseo-meta.php) / [includes/class-plseo-robots.php](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/includes/class-plseo-robots.php)
+
+The option `noindex_empty_taxonomy` exists in defaults and the admin UI, but [get_robots()](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/includes/class-plseo-meta.php#125-170) in [PLSEO_Meta](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/includes/class-plseo-meta.php#4-208) never checks it. Empty taxonomy archives will be indexed regardless.
+
+```php
+// Add inside get_robots():
+if ( ( is_tax() || is_category() || is_tag() ) && PLSEO_Helpers::get_option( 'noindex_empty_taxonomy', true ) ) {
+    $term = get_queried_object();
+    if ( $term instanceof WP_Term && 0 === $term->count ) {
+        return 'noindex, follow';
+    }
+}
+```
+
+---
+
+### 14. [PLSEO_Hreflang](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/includes/class-plseo-hreflang.php#4-110) — Archive pages (author, date, post-type) have no hreflang
+**File:** [includes/class-plseo-hreflang.php](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/includes/class-plseo-hreflang.php) · [get_hreflang_links()](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/includes/class-plseo-hreflang.php#47-97)
+
+The method handles singular, taxonomy, and front page — but not author/date/post-type archives. Those pages fall through and produce no hreflang tags, which is correct for non-translated archives but should be called out explicitly.
+
+---
+
+### 15. Social media options lack `social_facebook`, `social_twitter`, `social_linkedin`
+**File:** [includes/class-plseo-schema.php](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/includes/class-plseo-schema.php) · lines 111–115 & [includes/class-plseo-options.php](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/includes/class-plseo-options.php)
+
+The Schema class references:
+```php
+PLSEO_Helpers::get_option( 'social_facebook' ),
+PLSEO_Helpers::get_option( 'social_twitter' ),
+PLSEO_Helpers::get_option( 'social_linkedin' ),
+```
+
+But none of these keys exist in `PLSEO_Options::get_defaults()`, and the social Settings page only covers OG/Twitter Card — not sameAs profile URLs. Add these to defaults and the admin social settings page.
+
+---
+
+## ✅ What's Working Well
+
+| Area | Notes |
+|---|---|
+| **Architecture** | Clean singleton pattern, consistent `ABSPATH` guard, proper hook priorities |
+| **Escaping** | Nearly all output uses `esc_attr`, `esc_url`, `esc_html`, `esc_xml` correctly |
+| **Hreflang** | Properly handles `zh_CN → zh-Hans` locale mapping, x-default logic is correct |
+| **Canonical** | Correctly removes WP's built-in `rel_canonical`, handles HTTPS normalisation |
+| **Sitemap** | Translation-set deduplication via fingerprint is an elegant pattern |
+| **Metabox save** | Good nonce verification, autosave guard, capability check, type-aware sanitization |
+| **Polylang integration** | All Polylang function calls are guarded with `function_exists()` |
+| **Breadcrumbs** | Parent/ancestor traversal is correct for both posts and hierarchical terms |
+
+---
+
+## Priority Fix List
+
+| # | Severity | File | Issue |
+|---|---|---|---|
+| 1 | 🔴 High | [class-plseo-sitemap.php](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/includes/class-plseo-sitemap.php) | [maybe_flush](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/includes/class-plseo-sitemap.php#466-469) runs on every save |
+| 2 | 🔴 High | [class-plseo-redirects.php](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/includes/class-plseo-redirects.php) | [handle_old_slug_redirect](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/includes/class-plseo-redirects.php#26-29) is a stub |
+| 3 | 🔴 High | [class-plseo-schema.php](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/includes/class-plseo-schema.php) | [add_local_business_to_graph](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/includes/class-plseo-schema.php#225-226) is empty |
+| 5 | 🟡 Medium | [class-plseo-opengraph.php](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/includes/class-plseo-opengraph.php) | Article meta on wrong og:type |
+| 7 | 🟡 Medium | [class-plseo-schema.php](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/includes/class-plseo-schema.php) | `get_permalink()` without args outside loop |
+| 13 | 🟡 Medium | [class-plseo-meta.php](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/includes/class-plseo-meta.php) | `noindex_empty_taxonomy` never enforced |
+| 15 | 🟡 Medium | [class-plseo-schema.php](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/includes/class-plseo-schema.php) | Missing social profile options in defaults |
+| 4 | 🟠 Low | [class-plseo-schema.php](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/includes/class-plseo-schema.php) | Null/empty values leak into JSON-LD |
+| 8 | 🟠 Low | [class-plseo-taxonomy-meta.php](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/admin/class-plseo-taxonomy-meta.php) | Missing `wp_unslash()` before sanitize |
+| 12 | 🟠 Low | [class-plseo-options.php](file:///c:/Users/Administrator/Local%20Sites/demo/app/public/wp-content/plugins/wt-multi-seo-pro/includes/class-plseo-options.php) | Generic sanitize callback misses URL fields |

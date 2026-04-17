@@ -1,0 +1,28 @@
+.plseo-wrap .plseo-headline {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.plseo-wrap .plseo-card {
+    margin-top: 16px;
+    padding: 20px;
+    background: #fff;
+    border: 1px solid #dcdcde;
+    border-radius: 8px;
+}
+
+.plseo-wrap .plseo-grid-two {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 24px;
+}
+
+.plseo-wrap .plseo-check {
+    display: block;
+    margin: 8px 0;
+}
+
+#plseo-ping-msg {
+    margin-left: 10px;
+}

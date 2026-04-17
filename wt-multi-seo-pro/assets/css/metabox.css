@@ -1,0 +1,135 @@
+.plseo-metabox-grid {
+    display: grid;
+    gap: 16px;
+    margin-top: 8px;
+}
+
+.plseo-card {
+    background: #fff;
+    border: 1px solid #dcdcde;
+    border-radius: 10px;
+    overflow: hidden;
+    box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+}
+
+.plseo-card-header {
+    padding: 14px 16px;
+    background: linear-gradient(180deg, #fcfcfd 0%, #f9fafb 100%);
+    border-bottom: 1px solid #e5e7eb;
+}
+
+.plseo-card-header h3 {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 600;
+    color: #111827;
+}
+
+.plseo-card-header p {
+    margin: 6px 0 0;
+    color: #6b7280;
+    font-size: 12px;
+}
+
+.plseo-card-body {
+    padding: 16px;
+    display: grid;
+    gap: 14px;
+}
+
+.plseo-two-col {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+@media (max-width: 960px) {
+    .plseo-two-col {
+        grid-template-columns: 1fr;
+    }
+}
+
+.plseo-field label {
+    display: block;
+    margin: 0 0 6px;
+    color: #111827;
+    font-weight: 600;
+    font-size: 12px;
+}
+
+.plseo-field input[type="text"],
+.plseo-field input[type="url"],
+.plseo-field textarea {
+    border: 1px solid #d1d5db;
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: 13px;
+    line-height: 1.45;
+    box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.02);
+}
+
+.plseo-field input[type="text"]:focus,
+.plseo-field input[type="url"]:focus,
+.plseo-field textarea:focus {
+    border-color: #2271b1;
+    box-shadow: 0 0 0 1px #2271b1;
+    outline: none;
+}
+
+.plseo-metabox-grid hr {
+    margin: 0;
+    border: 0;
+    border-top: 1px solid #dcdcde;
+}
+
+.plseo-field-inline {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.plseo-field-inline label {
+    display: inline-flex;
+    gap: 6px;
+    align-items: center;
+    border: 1px solid #e5e7eb;
+    border-radius: 999px;
+    padding: 7px 12px;
+    background: #f9fafb;
+    font-size: 12px;
+    font-weight: 500;
+    color: #374151;
+}
+
+.plseo-note {
+    margin: 0;
+    color: #6b7280;
+}
+
+.plseo-translation-list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: grid;
+    gap: 8px;
+}
+
+.plseo-translation-list li {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.plseo-translation-list a {
+    text-decoration: none;
+    font-weight: 600;
+}
+
+.plseo-current {
+    display: inline-flex;
+    align-items: center;
+    border-radius: 999px;
+    padding: 2px 8px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #166534;
+    background: #dcfce7;
+}

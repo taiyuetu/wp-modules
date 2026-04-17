@@ -1,0 +1,91 @@
+.plseo-wrap .plseo-headline {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+.plseo-wrap .plseo-card {
+    margin-top: 16px;
+    padding: 20px 24px;
+    background: #fff;
+    border: 1px solid #dcdcde;
+    border-radius: 8px;
+    box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+}
+
+.plseo-wrap .plseo-card h2 {
+    margin-top: 0;
+    margin-bottom: 8px;
+}
+
+.plseo-wrap .plseo-card .description {
+    margin-top: 0;
+}
+
+.plseo-wrap .plseo-grid-two {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 24px;
+}
+
+.plseo-wrap .plseo-check {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin: 10px 0;
+}
+
+.plseo-wrap .plseo-check input[type="checkbox"] {
+    margin: 2px 0 0;
+}
+
+.plseo-wrap textarea.large-text {
+    min-height: 96px;
+}
+
+.plseo-wrap code {
+    word-break: break-word;
+}
+
+.plseo-wrap .plseo-cpt-archive-block {
+    margin-top: 18px;
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    padding: 14px 16px;
+    background: #fcfcfd;
+}
+
+.plseo-wrap .plseo-cpt-archive-block h3 {
+    margin: 0 0 10px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+#plseo-ping-msg {
+    display: inline-block;
+    margin-left: 10px;
+    min-width: 160px;
+    font-weight: 500;
+}
+
+#plseo-ping-msg.is-success {
+    color: #06752f;
+}
+
+#plseo-ping-msg.is-error {
+    color: #b32d2e;
+}
+
+@media (max-width: 782px) {
+    .plseo-wrap .plseo-card {
+        padding: 16px;
+    }
+
+    .plseo-wrap .form-table th,
+    .plseo-wrap .form-table td {
+        display: block;
+        width: 100%;
+    }
+}
