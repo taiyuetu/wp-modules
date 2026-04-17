@@ -108,9 +108,33 @@ class PLSEO_Helpers {
             return '';
         }
 
-        $value = $all[ $post_type ][ $key ] ?? '';
+        $value = self::resolve_cpt_archive_lang_value( $all[ $post_type ], $key );
 
         return is_string( $value ) ? trim( $value ) : '';
+    }
+
+    private static function resolve_cpt_archive_lang_value( array $post_type_settings, string $key ): string {
+        // Backward compatibility: old storage without per-language nesting.
+        if ( isset( $post_type_settings[ $key ] ) && is_string( $post_type_settings[ $key ] ) ) {
+            return $post_type_settings[ $key ];
+        }
+
+        $current_lang = self::current_lang();
+        $default_lang = function_exists( 'pll_default_language' ) ? (string) pll_default_language() : '';
+
+        if ( $current_lang && isset( $post_type_settings[ $current_lang ][ $key ] ) && is_string( $post_type_settings[ $current_lang ][ $key ] ) ) {
+            return $post_type_settings[ $current_lang ][ $key ];
+        }
+
+        if ( $default_lang && isset( $post_type_settings[ $default_lang ][ $key ] ) && is_string( $post_type_settings[ $default_lang ][ $key ] ) ) {
+            return $post_type_settings[ $default_lang ][ $key ];
+        }
+
+        if ( isset( $post_type_settings['default'][ $key ] ) && is_string( $post_type_settings['default'][ $key ] ) ) {
+            return $post_type_settings['default'][ $key ];
+        }
+
+        return '';
     }
 
     public static function truncate( string $str, int $limit ): string {

@@ -297,29 +297,52 @@ class PLSEO_Admin {
         ];
 
         $sanitized = [];
+        $languages = array_keys( PLSEO_Helpers::get_languages() );
+        $languages[] = 'default';
+        $languages = array_unique( array_filter( array_map( 'sanitize_key', $languages ) ) );
 
         foreach ( $raw as $post_type => $settings ) {
             if ( ! is_string( $post_type ) || ! post_type_exists( $post_type ) || ! is_array( $settings ) ) {
                 continue;
             }
 
-            foreach ( $allowed_fields as $field ) {
-                if ( 'inherit_defaults' === $field ) {
-                    $sanitized[ $post_type ][ $field ] = isset( $settings[ $field ] ) ? '1' : '';
+            $has_language_structure = false;
+            foreach ( array_keys( $settings ) as $setting_key ) {
+                if ( in_array( sanitize_key( (string) $setting_key ), $languages, true ) ) {
+                    $has_language_structure = true;
+                    break;
+                }
+            }
+
+            // Backward compatibility: migrate old single-language structure into default language bucket.
+            if ( ! $has_language_structure ) {
+                $settings = [ 'default' => $settings ];
+            }
+
+            foreach ( $settings as $lang => $lang_settings ) {
+                $lang = sanitize_key( (string) $lang );
+                if ( ! in_array( $lang, $languages, true ) || ! is_array( $lang_settings ) ) {
                     continue;
                 }
 
-                $value = $settings[ $field ] ?? '';
-                if ( ! is_string( $value ) ) {
-                    $value = '';
-                }
+                foreach ( $allowed_fields as $field ) {
+                    if ( 'inherit_defaults' === $field ) {
+                        $sanitized[ $post_type ][ $lang ][ $field ] = isset( $lang_settings[ $field ] ) ? '1' : '';
+                        continue;
+                    }
 
-                if ( in_array( $field, [ 'canonical', 'og_image', 'twitter_image' ], true ) ) {
-                    $sanitized[ $post_type ][ $field ] = esc_url_raw( $value );
-                } elseif ( in_array( $field, [ 'description', 'og_description' ], true ) ) {
-                    $sanitized[ $post_type ][ $field ] = sanitize_textarea_field( $value );
-                } else {
-                    $sanitized[ $post_type ][ $field ] = sanitize_text_field( $value );
+                    $value = $lang_settings[ $field ] ?? '';
+                    if ( ! is_string( $value ) ) {
+                        $value = '';
+                    }
+
+                    if ( in_array( $field, [ 'canonical', 'og_image', 'twitter_image' ], true ) ) {
+                        $sanitized[ $post_type ][ $lang ][ $field ] = esc_url_raw( $value );
+                    } elseif ( in_array( $field, [ 'description', 'og_description' ], true ) ) {
+                        $sanitized[ $post_type ][ $lang ][ $field ] = sanitize_textarea_field( $value );
+                    } else {
+                        $sanitized[ $post_type ][ $lang ][ $field ] = sanitize_text_field( $value );
+                    }
                 }
             }
         }

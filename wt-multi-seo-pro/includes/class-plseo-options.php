@@ -160,10 +160,31 @@ class PLSEO_Options {
             return absint( $value );
         }
 
+        if ( 'plseo_cpt_archive_seo' === $key ) {
+            return is_array( $value ) ? $this->sanitize_recursive_text_array( $value ) : [];
+        }
+
         if ( is_array( $value ) ) {
             return array_map( 'sanitize_text_field', $value );
         }
 
         return sanitize_text_field( (string) $value );
+    }
+
+    private function sanitize_recursive_text_array( array $value ): array {
+        $sanitized = [];
+
+        foreach ( $value as $array_key => $array_value ) {
+            $clean_key = sanitize_key( (string) $array_key );
+
+            if ( is_array( $array_value ) ) {
+                $sanitized[ $clean_key ] = $this->sanitize_recursive_text_array( $array_value );
+                continue;
+            }
+
+            $sanitized[ $clean_key ] = sanitize_text_field( (string) $array_value );
+        }
+
+        return $sanitized;
     }
 }

@@ -42,4 +42,58 @@ jQuery(function ($) {
             }, 1500);
         }
     });
+
+    function extractFieldName(name) {
+        var match = (name || '').match(/\[([a-z_]+)\]$/i);
+        return match ? match[1] : '';
+    }
+
+    $(document).on('click', '.plseo-copy-default-lang', function () {
+        var $button = $(this);
+        var $block = $button.closest('.plseo-cpt-archive-block');
+        var targetLang = $button.data('target-lang');
+        var defaultLang = $block.data('default-lang');
+
+        if (!targetLang || !defaultLang) {
+            return;
+        }
+
+        var $sourceTable = $block.find('table.form-table[data-lang="' + defaultLang + '"]');
+        var $targetTable = $block.find('table.form-table[data-lang="' + targetLang + '"]');
+
+        if (!$sourceTable.length || !$targetTable.length) {
+            return;
+        }
+
+        var sourceValues = {};
+        $sourceTable.find('input[name], textarea[name]').each(function () {
+            var $field = $(this);
+            var fieldName = extractFieldName($field.attr('name'));
+            if (!fieldName) {
+                return;
+            }
+
+            if ($field.is(':checkbox')) {
+                sourceValues[fieldName] = $field.is(':checked');
+                return;
+            }
+
+            sourceValues[fieldName] = $field.val();
+        });
+
+        $targetTable.find('input[name], textarea[name]').each(function () {
+            var $field = $(this);
+            var fieldName = extractFieldName($field.attr('name'));
+            if (!fieldName || sourceValues[fieldName] === undefined) {
+                return;
+            }
+
+            if ($field.is(':checkbox')) {
+                $field.prop('checked', !!sourceValues[fieldName]).trigger('change');
+                return;
+            }
+
+            $field.val(sourceValues[fieldName]).trigger('input').trigger('change');
+        });
+    });
 });

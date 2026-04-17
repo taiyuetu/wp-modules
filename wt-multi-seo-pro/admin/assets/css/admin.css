@@ -63,6 +63,22 @@
     gap: 8px;
 }
 
+.plseo-wrap .plseo-cpt-lang-title {
+    margin: 14px 0 0;
+    padding-top: 10px;
+    border-top: 1px dashed #d1d5db;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.plseo-wrap .plseo-cpt-archive-block > .plseo-cpt-lang-title:first-of-type {
+    margin-top: 0;
+    padding-top: 0;
+    border-top: 0;
+}
+
 #plseo-ping-msg {
     display: inline-block;
     margin-left: 10px;
