@@ -5,6 +5,7 @@
  * Removes taxonomy base slugs and custom post type slugs from permalink URLs.
  * Handles conflict detection between pages, posts, terms, and CPTs.
  * Uses transient caching for performance.
+ * Fully integrated with Polylang (hides default language prefix, adds non-default prefixes).
  * 
  * @package Taiyuetu
  */
@@ -16,6 +17,78 @@ if (!defined('ABSPATH')) {
 // ─────────────────────────────────────────────────────────────────────────────
 // SECTION 1: Configuration & Helpers
 // ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Check if Polylang is fully active and ready to use.
+ * We cache the result per-request because function_exists is cheap but
+ * the semantic "is Polylang usable" check should be in one place.
+ *
+ * @return bool
+ */
+function taiyuetu_is_polylang_active()
+{
+    static $active = null;
+    if ($active === null) {
+        $active = function_exists('pll_languages_list')
+            && function_exists('pll_default_language')
+            && function_exists('pll_current_language');
+    }
+    return $active;
+}
+
+/**
+ * Get the Polylang default language slug, or empty string if Polylang is not active.
+ *
+ * @return string
+ */
+function taiyuetu_pll_default_lang()
+{
+    static $lang = null;
+    if ($lang === null) {
+        $lang = taiyuetu_is_polylang_active() ? pll_default_language('slug') : '';
+    }
+    return $lang;
+}
+
+/**
+ * Get the list of non-default Polylang language slugs.
+ * Returns empty array if Polylang is not active.
+ *
+ * @return string[]
+ */
+function taiyuetu_pll_non_default_languages()
+{
+    if (!taiyuetu_is_polylang_active()) {
+        return array();
+    }
+
+    $all = pll_languages_list(array('fields' => 'slug'));
+    if (!is_array($all)) {
+        return array();
+    }
+
+    $default = taiyuetu_pll_default_lang();
+    return array_values(array_filter($all, function ($slug) use ($default) {
+        return $slug !== $default;
+    }));
+}
+
+/**
+ * Whether Polylang is configured to hide the default language from URLs.
+ * This is the most common configuration (Settings > Languages > URL modifications).
+ * When "hide" is on, the default language has no /en/ prefix; other languages get /zh/, /ja/, etc.
+ *
+ * @return bool
+ */
+function taiyuetu_pll_hides_default_lang()
+{
+    if (!taiyuetu_is_polylang_active()) {
+        return false;
+    }
+    $options = get_option('polylang', array());
+    // Polylang `hide_default` is 1 when the default language code is hidden from URLs
+    return !empty($options['hide_default']);
+}
 
 /**
  * Get the list of taxonomies that should have their base removed.
@@ -31,6 +104,10 @@ function taiyuetu_get_clean_url_taxonomies()
         'link_category', // Link categories (legacy)
         'wp_theme', // Block themes
         'wp_template_part_area', // Template parts
+        'language', // Polylang internal taxonomy
+        'post_translations', // Polylang translations
+        'term_translations', // Polylang term translations
+        'term_language', // Polylang term language
     );
 
     /**
@@ -42,8 +119,37 @@ function taiyuetu_get_clean_url_taxonomies()
 
     $public_taxonomies = get_taxonomies(array('public' => true), 'names');
 
-    return array_diff($public_taxonomies, $excluded);
+    $taxonomies = array_values(array_diff($public_taxonomies, $excluded));
+
+    /**
+     * Control which taxonomy "wins" when the same slug exists in multiple taxonomies.
+     * Earlier entries in the array take precedence for clean (base-stripped) URLs.
+     *
+     * @param string[] $taxonomies Public taxonomies eligible for clean URLs.
+     */
+    return apply_filters('taiyuetu_clean_url_taxonomy_order', $taxonomies);
 }
+
+/**
+ * Prefer product_category over default category / tags when resolving slug collisions.
+ *
+ * @param string[] $taxonomies Ordered taxonomy names from taiyuetu_get_clean_url_taxonomies().
+ * @return string[]
+ */
+function taiyuetu_prioritize_product_category_taxonomy($taxonomies)
+{
+    $priority = array('product_category');
+    $first = array();
+    foreach ($priority as $p) {
+        if (in_array($p, $taxonomies, true)) {
+            $first[] = $p;
+        }
+    }
+    $rest = array_diff($taxonomies, $first);
+
+    return array_merge($first, array_values($rest));
+}
+add_filter('taiyuetu_clean_url_taxonomy_order', 'taiyuetu_prioritize_product_category_taxonomy', 5);
 
 /**
  * Get the list of custom post types that should have their slug removed.
@@ -208,25 +314,30 @@ function taiyuetu_is_reserved_slug($slug, $context = 'term')
  * Build a map of all term slugs → taxonomy for conflict detection.
  * Cached via transient for performance.
  *
+ * @param bool $force_refresh Force rebuild the cache.
  * @return array Associative array: slug => array of taxonomy names that use it.
  */
-function taiyuetu_get_term_slug_map()
+function taiyuetu_get_term_slug_map($force_refresh = false)
 {
     $cache_key = 'taiyuetu_term_slug_map';
-    $map = get_transient($cache_key);
 
-    if ($map !== false) {
-        return $map;
+    if (!$force_refresh) {
+        $map = get_transient($cache_key);
+        if ($map !== false) {
+            return $map;
+        }
     }
 
     $map = array();
     $taxonomies = taiyuetu_get_clean_url_taxonomies();
 
     foreach ($taxonomies as $taxonomy) {
+        // Bypass Polylang language filtering — we want ALL terms across ALL languages
         $terms = get_terms(array(
             'taxonomy' => $taxonomy,
             'hide_empty' => false,
             'fields' => 'id=>slug',
+            'lang' => '', // Polylang: fetch all languages
         ));
 
         if (!is_wp_error($terms)) {
@@ -234,13 +345,15 @@ function taiyuetu_get_term_slug_map()
                 if (!isset($map[$term_slug])) {
                     $map[$term_slug] = array();
                 }
-                $map[$term_slug][] = $taxonomy;
+                if (!in_array($taxonomy, $map[$term_slug], true)) {
+                    $map[$term_slug][] = $taxonomy;
+                }
             }
         }
     }
 
-    // Cache for 12 hours — invalidated on term create/edit/delete
-    set_transient($cache_key, $map, 12 * HOUR_IN_SECONDS);
+    // Cache for 6 hours — invalidated on term create/edit/delete
+    set_transient($cache_key, $map, 6 * HOUR_IN_SECONDS);
 
     return $map;
 }
@@ -317,28 +430,32 @@ add_filter('term_link', 'taiyuetu_remove_taxonomy_base', 999, 3);
 /**
  * Generate rewrite rules for taxonomy terms without base slugs.
  * Uses cached term data and proper regex escaping.
+ * Properly integrates with Polylang:
+ *   - Default language: no prefix, no &lang= parameter (Polylang detects it)
+ *   - Non-default languages: /lang-slug/ prefix + &lang= parameter
+ *   - When Polylang is not active: only bare rules (no language prefixes)
  */
 function taiyuetu_taxonomy_rewrite_rules()
 {
     $taxonomies = taiyuetu_get_clean_url_taxonomies();
     $slug_map = taiyuetu_get_term_slug_map();
-    $language_slugs = array();
-
-    if (function_exists('pll_languages_list')) {
-        $language_slugs = pll_languages_list(array('fields' => 'slug'));
-        if (!is_array($language_slugs)) {
-            $language_slugs = array();
-        }
-    }
+    $pll_active = taiyuetu_is_polylang_active();
+    $non_default_langs = taiyuetu_pll_non_default_languages();
 
     // Track which slugs already have rules to prevent duplicates
     $registered_slugs = array();
 
     foreach ($taxonomies as $taxonomy) {
-        $terms = get_terms(array(
+        // Use `lang => ''` to get terms from ALL languages when Polylang is active
+        $term_args = array(
             'taxonomy' => $taxonomy,
             'hide_empty' => false,
-        ));
+        );
+        if ($pll_active) {
+            $term_args['lang'] = ''; // Bypass Polylang language filtering
+        }
+
+        $terms = get_terms($term_args);
 
         if (empty($terms) || is_wp_error($terms)) {
             continue;
@@ -398,6 +515,12 @@ function taiyuetu_taxonomy_rewrite_rules()
             }
             $registered_slugs[] = $raw_prefix;
 
+            /**
+             * Helper closure to add the rewrite rules for a given term.
+             *
+             * @param string $rule_prefix  Regex prefix for the rewrite rule.
+             * @param string $lang_query   Additional query string for language parameter.
+             */
             $add_term_rules = function ($rule_prefix, $lang_query) use ($query_var, $term) {
                 // Main term page
                 add_rewrite_rule(
@@ -435,16 +558,26 @@ function taiyuetu_taxonomy_rewrite_rules()
                 );
             };
 
-            // Default (non-language-prefixed) rules
+            // ── DEFAULT LANGUAGE / NO POLYLANG ──
+            // Bare rules (no language prefix, no &lang= param).
+            // When Polylang hides the default language from URL, the default language
+            // pages are served at the bare URL (e.g., /wheel-hub-bearings/).
+            // When Polylang is not active, same bare rules apply.
             $add_term_rules($url_prefix, '');
 
-            // Polylang language-prefixed rules, e.g. /fr/term-slug
-            foreach ($language_slugs as $language_slug) {
-                $escaped_language_slug = preg_quote($language_slug, '/');
-                $add_term_rules($escaped_language_slug . '/' . $url_prefix, '&lang=' . $language_slug);
+            // ── NON-DEFAULT POLYLANG LANGUAGES ──
+            // Language-prefixed rules, e.g. /zh/wheel-hub-bearings → &lang=zh
+            if ($pll_active) {
+                foreach ($non_default_langs as $language_slug) {
+                    $escaped_language_slug = preg_quote($language_slug, '/');
+                    $add_term_rules(
+                        $escaped_language_slug . '/' . $url_prefix,
+                        '&lang=' . $language_slug
+                    );
+                }
             }
 
-            // For top-level terms from hierarchical taxonomies, also add the flat slug rule
+            // For child terms from hierarchical taxonomies, also add the flat slug rule
             // so both /parent/child/ and /child/ work (if no collision)
             if (is_taxonomy_hierarchical($taxonomy) && $term->parent > 0) {
                 if (
@@ -453,9 +586,14 @@ function taiyuetu_taxonomy_rewrite_rules()
                 && !(isset($slug_map[$term->slug]) && count($slug_map[$term->slug]) > 1)
                 ) {
                     $add_term_rules($escaped_slug, '');
-                    foreach ($language_slugs as $language_slug) {
-                        $escaped_language_slug = preg_quote($language_slug, '/');
-                        $add_term_rules($escaped_language_slug . '/' . $escaped_slug, '&lang=' . $language_slug);
+                    if ($pll_active) {
+                        foreach ($non_default_langs as $language_slug) {
+                            $escaped_language_slug = preg_quote($language_slug, '/');
+                            $add_term_rules(
+                                $escaped_language_slug . '/' . $escaped_slug,
+                                '&lang=' . $language_slug
+                            );
+                        }
                     }
                 }
             }
@@ -463,6 +601,85 @@ function taiyuetu_taxonomy_rewrite_rules()
     }
 }
 add_action('init', 'taiyuetu_taxonomy_rewrite_rules', 10);
+
+/**
+ * Fix: Ensure Polylang recognises our custom taxonomy queries as proper taxonomy queries.
+ * 
+ * When we rewrite /wheel-hub-bearings/ → index.php?product_category=wheel-hub-bearings,
+ * Polylang may not know which language to assign if the term belongs to the default language.
+ * This filter ensures that when a taxonomy query is resolved without a `lang` parameter
+ * and Polylang is active, the query is treated correctly as the default language.
+ *
+ * This also fixes the 404 issue: when Polylang filters the query and cannot determine
+ * the language for a custom taxonomy term, it may inadvertently return no results.
+ * By explicitly telling Polylang "this is default language content", the 404 disappears.
+ */
+function taiyuetu_fix_polylang_taxonomy_query($query)
+{
+    if (!$query->is_main_query() || is_admin()) {
+        return;
+    }
+
+    if (!taiyuetu_is_polylang_active()) {
+        return;
+    }
+
+    // Get all custom taxonomies we manage
+    $eligible_taxonomies = taiyuetu_get_clean_url_taxonomies();
+    $found_tax = '';
+    $found_term_slug = '';
+
+    foreach ($eligible_taxonomies as $taxonomy) {
+        $term_slug = $query->get($taxonomy);
+        if (!empty($term_slug)) {
+            $found_tax = $taxonomy;
+            $found_term_slug = $term_slug;
+            break;
+        }
+    }
+
+    // Also check built-in taxonomies
+    if (empty($found_tax)) {
+        $cat = $query->get('category_name');
+        if (!empty($cat)) {
+            $found_tax = 'category';
+            $found_term_slug = $cat;
+        }
+    }
+    if (empty($found_tax)) {
+        $tag = $query->get('tag');
+        if (!empty($tag)) {
+            $found_tax = 'post_tag';
+            $found_term_slug = $tag;
+        }
+    }
+
+    if (empty($found_tax)) {
+        return;
+    }
+
+    // If `lang` is already set in the query, don't override it
+    $lang_from_query = $query->get('lang');
+    if (!empty($lang_from_query)) {
+        return;
+    }
+
+    // Look up the term and determine its Polylang language
+    $term = get_term_by('slug', $found_term_slug, $found_tax);
+    if (!$term || is_wp_error($term)) {
+        return;
+    }
+
+    // Get the language of this specific term from Polylang
+    if (function_exists('pll_get_term_language')) {
+        $term_lang = pll_get_term_language($term->term_id, 'slug');
+        if ($term_lang) {
+            // Tell Polylang which language this is
+            $query->set('lang', $term_lang);
+        }
+    }
+}
+add_action('pre_get_posts', 'taiyuetu_fix_polylang_taxonomy_query', 1);
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -656,6 +873,50 @@ function taiyuetu_handle_404_fallback($preempt, $query)
         return false;
     }
 
+    // ── 404 FALLBACK FOR TAXONOMY TERMS ──
+    // If the request matches a taxonomy term slug, resolve it as a taxonomy archive.
+    // This catches cases where our rewrite rules missed the term (e.g., newly created term
+    // before the rules were flushed).
+    $slug_map = taiyuetu_get_term_slug_map();
+    if (isset($slug_map[$request])) {
+        $taxonomies = $slug_map[$request];
+        $winning_taxonomy = $taxonomies[0];
+
+        $term = get_term_by('slug', $request, $winning_taxonomy);
+        if ($term && !is_wp_error($term)) {
+            // Determine the query var
+            if ($winning_taxonomy === 'category') {
+                $query->set('category_name', $request);
+            }
+            elseif ($winning_taxonomy === 'post_tag') {
+                $query->set('tag', $request);
+            }
+            else {
+                $query->set($winning_taxonomy, $request);
+            }
+
+            // If Polylang is active, set the lang
+            if (taiyuetu_is_polylang_active() && function_exists('pll_get_term_language')) {
+                $term_lang = pll_get_term_language($term->term_id, 'slug');
+                if ($term_lang) {
+                    $query->set('lang', $term_lang);
+                }
+            }
+
+            $query->is_404 = false;
+            $query->is_archive = true;
+            $query->is_tax = ($winning_taxonomy !== 'category' && $winning_taxonomy !== 'post_tag');
+            $query->is_category = ($winning_taxonomy === 'category');
+            $query->is_tag = ($winning_taxonomy === 'post_tag');
+
+            // Set the queried object
+            $query->queried_object = $term;
+            $query->queried_object_id = $term->term_id;
+
+            return false;
+        }
+    }
+
     return $preempt;
 }
 add_filter('pre_handle_404', 'taiyuetu_handle_404_fallback', 10, 2);
@@ -674,17 +935,58 @@ add_filter('pre_handle_404', 'taiyuetu_handle_404_fallback', 10, 2);
  */
 function taiyuetu_invalidate_url_caches($term_id = 0, $tt_id = 0, $taxonomy = '')
 {
-    // Clear the term slug map transient
+    // Clear all related transients immediately
     delete_transient('taiyuetu_term_slug_map');
-    // Clear cached conflict notices so resolved conflicts disappear immediately
     delete_transient('taiyuetu_slug_conflicts');
 
-    // Set flag to flush rewrite rules on next admin page load
+    // Reset static caches (within this request)
+    taiyuetu_get_term_slug_map(true);
+
+    // Set flag to flush rewrite rules on next page load
     update_option('taiyuetu_clean_url_flush_needed', 'yes', false); // autoload = false
 }
 add_action('created_term', 'taiyuetu_invalidate_url_caches', 10, 3);
 add_action('edited_term', 'taiyuetu_invalidate_url_caches', 10, 3);
 add_action('delete_term', 'taiyuetu_invalidate_url_caches', 10, 3);
+
+/**
+ * Page slug changes affect taiyuetu_is_reserved_slug() and conflict detection — refresh caches.
+ *
+ * @param int $post_id Post ID.
+ */
+function taiyuetu_invalidate_url_caches_on_page_save($post_id)
+{
+    if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) {
+        return;
+    }
+    if (wp_is_post_revision($post_id)) {
+        return;
+    }
+    $post = get_post($post_id);
+    if (!$post || $post->post_type !== 'page') {
+        return;
+    }
+    delete_transient('taiyuetu_term_slug_map');
+    delete_transient('taiyuetu_slug_conflicts');
+    update_option('taiyuetu_clean_url_flush_needed', 'yes', false);
+}
+
+/**
+ * @param int      $post_id Post ID.
+ * @param WP_Post|null $post Post object (available before removal on delete_post).
+ */
+function taiyuetu_invalidate_url_caches_on_page_delete($post_id, $post = null)
+{
+    $ptype = ($post && isset($post->post_type)) ? $post->post_type : get_post_type($post_id);
+    if ($ptype !== 'page') {
+        return;
+    }
+    delete_transient('taiyuetu_term_slug_map');
+    delete_transient('taiyuetu_slug_conflicts');
+    update_option('taiyuetu_clean_url_flush_needed', 'yes', false);
+}
+add_action('save_post_page', 'taiyuetu_invalidate_url_caches_on_page_save', 20);
+add_action('delete_post', 'taiyuetu_invalidate_url_caches_on_page_delete', 20, 2);
 
 /**
  * Also invalidate when permalink structure changes.
@@ -712,7 +1014,9 @@ function taiyuetu_invalidate_on_post_change($new_status, $old_status, $post)
     // Only care about status transitions involving 'publish'
     if ($new_status === 'publish' || $old_status === 'publish') {
         $clean_post_types = taiyuetu_get_clean_url_post_types();
-        if (in_array($post->post_type, $clean_post_types, true)) {
+        if (in_array($post->post_type, $clean_post_types, true) || $post->post_type === 'page') {
+            // Also clear the term slug map because conflict status may have changed
+            delete_transient('taiyuetu_term_slug_map');
             update_option('taiyuetu_clean_url_flush_needed', 'yes', false);
         }
     }
@@ -720,19 +1024,23 @@ function taiyuetu_invalidate_on_post_change($new_status, $old_status, $post)
 add_action('transition_post_status', 'taiyuetu_invalidate_on_post_change', 10, 3);
 
 /**
- * Conditionally flush rewrite rules on admin_init.
- * Only flushes when the flag is set, avoiding expensive operations on every load.
+ * Conditionally flush rewrite rules after clean URL rules are registered on init.
+ * Runs on front end and admin when the flag is set (not only admin_init), so visitors
+ * do not keep stale rules if permalinks were rebuilt without loading wp-admin.
  */
 function taiyuetu_maybe_flush_rewrite_rules()
 {
     if (get_option('taiyuetu_clean_url_flush_needed', 'no') === 'yes') {
+        // Delete stale transient so rules are rebuilt fresh
+        delete_transient('taiyuetu_term_slug_map');
+
         // Re-register rules first (init already fired, but we need fresh rules)
         taiyuetu_taxonomy_rewrite_rules();
         flush_rewrite_rules();
         update_option('taiyuetu_clean_url_flush_needed', 'no', false);
     }
 }
-add_action('admin_init', 'taiyuetu_maybe_flush_rewrite_rules');
+add_action('init', 'taiyuetu_maybe_flush_rewrite_rules', 99);
 
 /**
  * Also flush when switching themes (to ensure rules are fresh).
@@ -742,6 +1050,18 @@ function taiyuetu_flush_on_theme_switch()
     taiyuetu_invalidate_url_caches();
 }
 add_action('after_switch_theme', 'taiyuetu_flush_on_theme_switch');
+
+/**
+ * Flush rewrite rules when Polylang languages are added, removed, or modified.
+ * This ensures clean URL rules include/exclude the correct language prefixes.
+ */
+function taiyuetu_flush_on_polylang_language_change()
+{
+    taiyuetu_invalidate_url_caches();
+}
+add_action('pll_add_language', 'taiyuetu_flush_on_polylang_language_change');
+add_action('pll_update_language', 'taiyuetu_flush_on_polylang_language_change');
+add_action('pll_delete_language', 'taiyuetu_flush_on_polylang_language_change');
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -790,7 +1110,7 @@ function taiyuetu_slug_conflict_admin_notice()
     $dismissed_signature = $user_id ? get_user_meta($user_id, 'taiyuetu_dismissed_slug_conflicts_signature', true) : '';
 
     // Keep notice hidden for this user until conflict content changes.
-    if (!empty($signature) && hash_equals((string) $dismissed_signature, (string) $signature)) {
+    if (!empty($signature) && hash_equals((string)$dismissed_signature, (string)$signature)) {
         return;
     }
 
@@ -803,7 +1123,7 @@ function taiyuetu_slug_conflict_admin_notice()
     echo '</ul>';
     echo '<p>' . esc_html__('Conflicting URLs will retain their original structure to prevent errors.', 'taiyuetu') . '</p>';
     echo '</div>';
-    ?>
+?>
     <script>
         (function ($) {
             $(document).on('click', '.taiyuetu-slug-conflict-notice .notice-dismiss', function () {
