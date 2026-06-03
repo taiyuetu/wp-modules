@@ -1,0 +1,482 @@
+{
+  "name": "My workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 6
+            }
+          ]
+        }
+      },
+      "id": "a56b5110-b11c-437b-80bd-454c02700d8b",
+      "name": "Schedule Trigger (Every 6h)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -272,
+        16
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "f01b6caf-336c-415e-ab14-babd1cc018ff",
+              "name": "wp_base_url",
+              "value": "https://wheelhubassembly.com/wp-json/pll-translate/v1",
+              "type": "string"
+            },
+            {
+              "id": "a7c569f1-282d-4d51-8661-e083576af9ff",
+              "name": "deepseek_model",
+              "value": "deepseek-chat",
+              "type": "string"
+            },
+            {
+              "id": "2dd4909e-5e5e-4c76-962f-d620ea49254b",
+              "name": "deepseek_api_url",
+              "value": "https://api.deepseek.com/v1/chat/completions",
+              "type": "string"
+            },
+            {
+              "id": "b1c3e8f2-1234-5678-9abc-def012345678",
+              "name": "posts_per_batch",
+              "value": 50,
+              "type": "number"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "d0d55bef-73b6-4ec7-9681-06596f8da63b",
+      "name": "Config Variables",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -80,
+        16
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.wp_base_url }}/languages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "options": {
+          "response": {
+            "response": {}
+          }
+        }
+      },
+      "id": "8aff9d9b-3de5-4260-9d73-8c8f2f9ca7ca",
+      "name": "GET Languages",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        160,
+        16
+      ],
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "H9sjewfzO1O6muBT",
+          "name": "wheelhubassembly"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build list of [post_type, target_lang] pairs to process\nconst languages = $input.all().map(i => i.json);\nconst config = $('Config Variables').first().json;\n\nconst postTypes = ['product']; // ← ADD YOUR CPTs HERE\nconst defaultLang = languages.find(l => l.default)?.slug || 'en';\nconst targetLangs = languages.map(l => l.slug);\n\nconst jobs = [];\nfor (const pt of postTypes) {\n  for (const lang of targetLangs) {\n    jobs.push({\n      post_type: pt,\n      target_lang: lang,\n      default_lang: defaultLang,\n      wp_base_url: config.wp_base_url,\n      deepseek_api_url: config.deepseek_api_url,\n      deepseek_model: config.deepseek_model,\n      posts_per_batch: config.posts_per_batch || 50,\n    });\n  }\n}\n\nreturn jobs.map(j => ({ json: j }));"
+      },
+      "id": "ed3d99ba-c4b4-4a53-9a7d-b7d3006994b3",
+      "name": "Build Post Type + Lang Jobs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        368,
+        16
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Fetch ALL untranslated posts across ALL pages for ALL jobs ──\n// Replaces the old single-page \"GET Untranslated Posts\" + \"Flatten Post List\" nodes.\n// Uses $helpers.httpRequestWithAuthentication to reuse the stored Basic Auth credential.\n\nconst jobs = $input.all().map(i => i.json);\nconst allPostItems = [];\n\nfor (const job of jobs) {\n  let page = 1;\n  let hasMore = true;\n  const perPage = job.posts_per_batch || 50;\n\n  while (hasMore) {\n    const response = await $helpers.httpRequestWithAuthentication.call(\n      $nodeItem,\n      'httpBasicAuth',\n      {\n        method: 'GET',\n        url: `${job.wp_base_url}/untranslated-posts`,\n        qs: {\n          post_type:   job.post_type,\n          target_lang: job.target_lang,\n          per_page:    perPage,\n          page:        page\n        }\n      }\n    );\n\n    const posts = response.posts || [];\n\n    if (posts.length === 0) {\n      hasMore = false;\n      break;\n    }\n\n    for (const post of posts) {\n      for (const lang of post.missing_langs) {\n        allPostItems.push({\n          json: {\n            post_id:          post.id,\n            post_type:        post.post_type,\n            source_lang:      post.source_lang,\n            target_lang:      lang,\n            wp_base_url:      job.wp_base_url,\n            deepseek_api_url: job.deepseek_api_url,\n            deepseek_model:   job.deepseek_model\n          }\n        });\n      }\n    }\n\n    // If we got fewer results than a full page → we are on the last page\n    hasMore = posts.length >= perPage;\n    page++;\n\n    console.log(`[${job.post_type} → ${job.target_lang}] page ${page - 1}: fetched ${posts.length} posts (total so far: ${allPostItems.length})`);\n  }\n}\n\nif (allPostItems.length === 0) {\n  // Return a single sentinel so the workflow doesn't crash on empty input\n  return [{ json: { __skip: true, reason: 'No untranslated posts found' } }];\n}\n\nreturn allPostItems;"
+      },
+      "id": "c1a2b3d4-e5f6-7890-abcd-ef1234567890",
+      "name": "Fetch ALL Untranslated Posts (Paginated)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        592,
+        16
+      ],
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "H9sjewfzO1O6muBT",
+          "name": "wheelhubassembly"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "skip-check",
+              "leftValue": "={{ $json.__skip }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-e5f6-7890-abcd-111222333444",
+      "name": "Skip If No Posts",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        816,
+        16
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.wp_base_url }}/post-payload/{{ $json.post_id }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "options": {}
+      },
+      "id": "a0071f17-822b-4004-b056-4ac05a9a0462",
+      "name": "GET Post Payload",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1040,
+        16
+      ],
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "H9sjewfzO1O6muBT",
+          "name": "wheelhubassembly"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const responses = $input.all();\nconst jobs = $('Fetch ALL Untranslated Posts (Paginated)').all();\n\nreturn responses.map((inputItem, index) => {\n  const payload = inputItem.json;\n  const job = jobs[index].json;\n\n  const bundle = {\n    title:   payload.translatable.title,\n    content: payload.translatable.content,\n    excerpt: payload.translatable.excerpt,\n    slug:    payload.translatable.slug,\n  };\n\n  const meta_to_translate = {};\n  for (const [key, info] of Object.entries(payload.meta || {})) {\n    if (info.translatable) {\n      const val = (info.type === 'json' || info.type === 'serialized')\n        ? JSON.stringify(info.raw_value)\n        : String(info.raw_value);\n      if (val && val.trim()) meta_to_translate[key] = val;\n    }\n  }\n\n  const acf_to_translate = {};\n  for (const [key, info] of Object.entries(payload.acf_fields || {})) {\n    if (info.translatable && info.value) {\n      acf_to_translate[key] = String(info.value);\n    }\n  }\n\n  const taxonomy_source_terms = {};\n  for (const [tax, terms] of Object.entries(payload.taxonomies || {})) {\n    taxonomy_source_terms[tax] = terms.map(t => ({\n      source_term_id: t.term_id,\n      translations: t.translations\n    }));\n  }\n\n  const has_blocks = payload.has_blocks === true;\n  const block_segments = [];\n\n  if (has_blocks && payload.blocks?.segments?.length > 0) {\n    for (const seg of payload.blocks.segments) {\n      if (seg.text && seg.text.trim()) {\n        block_segments.push({\n          index:    seg.index,\n          sub_path: seg.sub_path,\n          is_html:  seg.is_html,\n          original: seg.text,\n        });\n      }\n    }\n  }\n\n  return {\n    json: {\n      ...job,\n      post_payload: payload,\n      bundle,\n      meta_to_translate,\n      acf_to_translate,\n      taxonomy_source_terms,\n      has_blocks,\n      block_segments,\n      block_original_content: has_blocks ? (payload.blocks?.original_content ?? null) : null,\n      target_lang: job.target_lang,\n      source_lang: payload.source_lang,\n    }\n  };\n});"
+      },
+      "id": "c308bf4e-133c-4664-980e-37ca235d4e2d",
+      "name": "Build Translation Bundle",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1248,
+        16
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "function decodeUnicodeEscapes(str) {\n  if (typeof str !== 'string') return str;\n  return str.replace(/\\\\u([0-9a-fA-F]{4})/g, (_, hex) =>\n    String.fromCharCode(parseInt(hex, 16))\n  );\n}\n\nfunction sanitizeForJSON(str) {\n  if (typeof str !== 'string') return str;\n  return str\n    .replace(/<!--\\s*wp:[^>]*\\{[^}]+\\}[^>]*-->/g, (match) =>\n      match.replace(/\"/g, '\\\\\"')\n    )\n    .replace(/\\r?\\n/g, \"\\\\n\");\n}\n\nconst CHUNK_SIZE = 12;\nconst FIELD_LIMIT = 3000;\n\nreturn $input.all().flatMap(inputItem => {\n  const item = inputItem.json;\n  const target_lang = item.target_lang;\n  const source_lang = item.source_lang;\n\n  const system_prompt = `You are a professional multilingual content translator for WordPress.\n\nSTRICT RULES (MUST FOLLOW):\n1. Return ONLY valid JSON that passes JSON.parse().\n2. Do NOT include markdown, explanations, or extra text.\n3. Escape ALL double quotes inside strings using \\\\\".\n4. Preserve ALL HTML tags exactly.\n5. Translate ONLY human-readable text.\n\nTRANSLATION REQUIREMENTS:\n- You MUST translate ALL fields inside:\n  core.title\n  core.excerpt\n  core.content (if exists)\n  meta (all values)\n  acf (all values)\n  blocks[].original → blocks[].translated\n\n- DO NOT leave ANY field untranslated.\n- DO NOT return original text.\n\nOUTPUT STRUCTURE (MUST MATCH EXACTLY):\n\n{\n  \"core\": {\n    \"title\": \"...translated...\",\n    \"excerpt\": \"...translated...\",\n    \"slug\": \"...translated-slug...\",\n    \"content\": \"...translated...\" // only if provided\n  },\n  \"meta\": {},\n  \"acf\": {},\n  \"blocks\": [\n    {\n      \"index\": number,\n      \"sub_path\": string,\n      \"translated\": string\n    }\n  ]\n}\n\nSLUG RULE:\n- lowercase\n- hyphen-separated\n- no spaces\n- no special characters`;\n\n  const requests = [];\n\n  const core_bundle = {\n    title:   sanitizeForJSON(item.bundle.title),\n    excerpt: sanitizeForJSON(item.bundle.excerpt),\n    slug:    item.bundle.slug,\n    ...(!item.has_blocks && item.bundle.content\n      ? { content: sanitizeForJSON(item.bundle.content) }\n      : {}),\n  };\n\n  const meta_entries = Object.entries(item.meta_to_translate || {});\n  const acf_entries  = Object.entries(item.acf_to_translate  || {});\n  const meta_size    = JSON.stringify(item.meta_to_translate || {}).length;\n  const acf_size     = JSON.stringify(item.acf_to_translate  || {}).length;\n\n  if (meta_size + acf_size < FIELD_LIMIT) {\n    requests.push({\n      chunk_type: 'core',\n      payload: {\n        core: core_bundle,\n        meta: item.meta_to_translate || {},\n        acf:  item.acf_to_translate  || {}\n      }\n    });\n  } else {\n    requests.push({\n      chunk_type: 'core',\n      payload: { core: core_bundle }\n    });\n\n    const META_CHUNK = 5;\n\n    for (let i = 0; i < meta_entries.length; i += META_CHUNK) {\n      requests.push({\n        chunk_type: 'meta',\n        payload: { meta: Object.fromEntries(meta_entries.slice(i, i + META_CHUNK)) }\n      });\n    }\n\n    for (let i = 0; i < acf_entries.length; i += META_CHUNK) {\n      requests.push({\n        chunk_type: 'acf',\n        payload: { acf: Object.fromEntries(acf_entries.slice(i, i + META_CHUNK)) }\n      });\n    }\n  }\n\n  const blocks_for_ds = (item.block_segments || []).map(seg => ({\n    index:    seg.index,\n    sub_path: seg.sub_path,\n    original: sanitizeForJSON(decodeUnicodeEscapes(seg.original)),\n  }));\n\n  for (let i = 0; i < blocks_for_ds.length; i += CHUNK_SIZE) {\n    requests.push({\n      chunk_type: 'blocks',\n      payload: { blocks: blocks_for_ds.slice(i, i + CHUNK_SIZE) }\n    });\n  }\n\n  const total_chunks = requests.length;\n  const post_id      = item.post_payload.id;\n\n  const shared_context = {\n    post_id,\n    target_lang,\n    source_lang,\n    chunk_type: null,\n    chunk_index: null,\n    total_chunks,\n    wp_base_url:            item.wp_base_url,\n    deepseek_model:         item.deepseek_model,\n    deepseek_api_url:       item.deepseek_api_url,\n    has_blocks:             item.has_blocks,\n    bundle:                 item.bundle,\n    block_segments:         item.block_segments,\n    block_original_content: item.block_original_content,\n    taxonomy_source_terms:  item.taxonomy_source_terms,\n    post_payload_id:        post_id,\n  };\n\n  return requests.map((req, i) => ({\n    json: {\n      ...shared_context,\n      chunk_type:  req.chunk_type,\n      chunk_index: i,\n      deepseek_request: {\n        model:       item.deepseek_model,\n        max_tokens:  4096,\n        temperature: 0.2,\n        messages: [\n          { role: 'system', content: system_prompt },\n          {\n            role: 'user',\n            content:\n`Translate from ${source_lang} to ${target_lang}.\n\nYou MUST translate ALL fields including:\n- core.title\n- core.excerpt\n- core.content (if exists)\n- meta (all values)\n- acf (all values)\n- blocks[].original → blocks[].translated\n\nDo NOT leave any field untranslated.\nDo NOT return original text.\n\nReturn ONLY valid JSON.\n\nINPUT:\n${JSON.stringify(req.payload)}`\n          }\n        ]\n      }\n    }\n  }));\n});"
+      },
+      "id": "9e61a441-7d4b-489e-bf5d-2eaf88a1e617",
+      "name": "Prepare DeepSeek Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1472,
+        16
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.deepseek_api_url }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "deepSeekApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.deepseek_request }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "0dec918d-c0f5-4e99-b1bb-91dcc796e298",
+      "name": "Call DeepSeek API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1696,
+        16
+      ],
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "deepSeekApi": {
+          "id": "cZnpLxwUNnSOHRrH",
+          "name": "DeepSeek account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Re-attach context from Prepare node by index\nconst dsResponses = $input.all();\nconst reqItems    = $('Prepare DeepSeek Request').all();\n\nreturn dsResponses.map((inputItem, index) => {\n  const ds_resp = inputItem.json;\n  const req     = reqItems[index].json;\n\n  return {\n    json: {\n      choices: ds_resp.choices,\n      post_id:                req.post_id,\n      chunk_index:            req.chunk_index,\n      chunk_type:             req.chunk_type,\n      total_chunks:           req.total_chunks,\n      target_lang:            req.target_lang,\n      source_lang:            req.source_lang,\n      wp_base_url:            req.wp_base_url,\n      deepseek_model:         req.deepseek_model,\n      deepseek_api_url:       req.deepseek_api_url,\n      has_blocks:             req.has_blocks,\n      bundle:                 req.bundle,\n      block_segments:         req.block_segments,\n      block_original_content: req.block_original_content,\n      taxonomy_source_terms:  req.taxonomy_source_terms,\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1904,
+        16
+      ],
+      "id": "b99b058e-d04b-4ef8-99b9-078ec7a7bcf1",
+      "name": "Merge DS Post Response"
+    },
+    {
+      "parameters": {
+        "jsCode": "function decodeUnicodeEscapes(str) {\n  if (typeof str !== 'string') return str;\n  return str.replace(/\\\\u([0-9a-fA-F]{4})/g, (_, hex) =>\n    String.fromCharCode(parseInt(hex, 16))\n  );\n}\n\nconst parsedChunks = [];\n\nfor (const inputItem of $input.all()) {\n  const item          = inputItem.json;\n  const deepseek_resp = item;\n\n  if (!deepseek_resp.choices || deepseek_resp.choices.length === 0) {\n    throw new Error(`DeepSeek returned no choices for post ${item.post_id} chunk ${item.chunk_index}`);\n  }\n\n  let raw = deepseek_resp.choices[0].message.content.trim();\n  raw = raw.replace(/^```json\\s*/i, '').replace(/\\s*```$/i, '');\n\n  let translated;\n  try {\n    translated = JSON.parse(raw);\n  } catch(e) {\n    throw new Error(`Failed to parse DeepSeek JSON for post ${item.post_id} chunk ${item.chunk_index}: ${e.message}`);\n  }\n\n  parsedChunks.push({ item, translated });\n}\n\n// Group by post_id + target_lang\nconst groups = {};\nfor (const { item, translated } of parsedChunks) {\n  const key = `${item.post_id}_${item.target_lang}`;\n  if (!groups[key]) {\n    groups[key] = { item, core_chunk: null, merged_meta: {}, merged_acf: {}, block_chunks: [] };\n  }\n  const g = groups[key];\n\n  if (item.chunk_type === 'core') {\n    g.core_chunk = translated;\n    if (translated.meta) Object.assign(g.merged_meta, translated.meta);\n    if (translated.acf)  Object.assign(g.merged_acf,  translated.acf);\n  } else if (item.chunk_type === 'meta') {\n    Object.assign(g.merged_meta, translated.meta || {});\n  } else if (item.chunk_type === 'acf') {\n    Object.assign(g.merged_acf, translated.acf || {});\n  } else if (item.chunk_type === 'blocks') {\n    g.block_chunks.push({ chunk_index: item.chunk_index, translated });\n  }\n}\n\nconst results = [];\n\nfor (const { item, core_chunk, merged_meta, merged_acf, block_chunks } of Object.values(groups)) {\n  if (!core_chunk?.core?.title) {\n    throw new Error(\n      `Missing title translation.\\nPost: ${item.post_id}\\nChunk: core\\nRaw: ${JSON.stringify(core_chunk)}`\n    );\n  }\n  block_chunks.sort((a, b) => a.chunk_index - b.chunk_index);\n\n  const all_translated_blocks = [];\n  for (const { translated } of block_chunks) {\n    if (translated.blocks) all_translated_blocks.push(...translated.blocks);\n  }\n\n  const tax_map = {};\n  for (const [tax, source_terms] of Object.entries(item.taxonomy_source_terms || {})) {\n    const target_ids = [];\n    for (const t of source_terms) {\n      const tid = t.translations?.[item.target_lang];\n      if (tid) target_ids.push(tid);\n    }\n    if (target_ids.length > 0) tax_map[tax] = target_ids;\n  }\n\n  let final_content = null;\n  if (item.has_blocks && item.block_original_content && all_translated_blocks.length > 0) {\n    let content = item.block_original_content;\n\n    for (const tb of all_translated_blocks) {\n      const orig_seg = (item.block_segments || []).find(s => s.index === tb.index);\n      if (!orig_seg || !tb.translated) continue;\n\n      const original_text   = decodeUnicodeEscapes(orig_seg.original);\n      const translated_text = decodeUnicodeEscapes(tb.translated);\n\n      if (!original_text || !translated_text) continue;\n      if (original_text === translated_text) continue;\n\n      content = content.split(orig_seg.original).join(translated_text);\n      if (orig_seg.original !== original_text) {\n        content = content.split(original_text).join(translated_text);\n      }\n    }\n    final_content = content;\n  }\n\n  results.push({\n    json: {\n      wp_base_url: item.wp_base_url,\n      save_payload: {\n        source_id:   item.post_id,\n        target_lang: item.target_lang,\n        translated: {\n          title:   core_chunk?.core?.title   ?? \"__MISSING_TRANSLATION__\",\n          content: item.has_blocks ? null    : (core_chunk?.core?.content || item.bundle.content),\n          excerpt: core_chunk?.core?.excerpt || item.bundle.excerpt,\n          slug:    core_chunk?.core?.slug    || (item.bundle.slug + '-' + item.target_lang),\n        },\n        meta:          merged_meta,\n        acf:           merged_acf,\n        tax_map,\n        block_content: final_content,\n      }\n    }\n  });\n}\n\nreturn results;"
+      },
+      "id": "403d917a-0017-4319-933e-ed668940f55d",
+      "name": "Parse DeepSeek Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2128,
+        16
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.wp_base_url }}/save-translation",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.save_payload }}",
+        "options": {}
+      },
+      "id": "2bf1b377-8762-4b59-8e4f-73f4d558f606",
+      "name": "Save Post Translation to WP",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2336,
+        16
+      ],
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "H9sjewfzO1O6muBT",
+          "name": "wheelhubassembly"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const responses = $input.all();\nfor (const resp of responses) {\n  const result = resp.json;\n  console.log(`✅ POST saved: ID=${result.post_id}, lang=${result.target_lang}, action=${result.action}`);\n}\nreturn responses;"
+      },
+      "id": "ff6da589-176a-4209-8046-7915b2f8b14d",
+      "name": "Log Post Success",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2560,
+        16
+      ]
+    },
+    {
+      "parameters": {
+        "amount": 2
+      },
+      "id": "214be825-8284-4bde-9aa2-13cfffa96d6e",
+      "name": "Rate Limit Delay",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        2784,
+        16
+      ],
+      "webhookId": "55919079-a9b6-4264-b8da-63efdf515a56"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Schedule Trigger (Every 6h)": {
+      "main": [
+        [
+          {
+            "node": "Config Variables",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config Variables": {
+      "main": [
+        [
+          {
+            "node": "GET Languages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET Languages": {
+      "main": [
+        [
+          {
+            "node": "Build Post Type + Lang Jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Post Type + Lang Jobs": {
+      "main": [
+        [
+          {
+            "node": "Fetch ALL Untranslated Posts (Paginated)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch ALL Untranslated Posts (Paginated)": {
+      "main": [
+        [
+          {
+            "node": "Skip If No Posts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Skip If No Posts": {
+      "main": [
+        [
+          {
+            "node": "GET Post Payload",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "GET Post Payload": {
+      "main": [
+        [
+          {
+            "node": "Build Translation Bundle",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Translation Bundle": {
+      "main": [
+        [
+          {
+            "node": "Prepare DeepSeek Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare DeepSeek Request": {
+      "main": [
+        [
+          {
+            "node": "Call DeepSeek API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call DeepSeek API": {
+      "main": [
+        [
+          {
+            "node": "Merge DS Post Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge DS Post Response": {
+      "main": [
+        [
+          {
+            "node": "Parse DeepSeek Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse DeepSeek Response": {
+      "main": [
+        [
+          {
+            "node": "Save Post Translation to WP",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Post Translation to WP": {
+      "main": [
+        [
+          {
+            "node": "Log Post Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Post Success": {
+      "main": [
+        [
+          {
+            "node": "Rate Limit Delay",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "50658306-e268-4ff5-8a88-49352a5c46c7",
+  "meta": {
+    "instanceId": "eb6f3ecc9f53814ad7ecfe2165b2d8aee9ad4d8a619d2073b455557097774986"
+  },
+  "id": "jpx6dBJpnIQQPgEz",
+  "tags": []
+}
