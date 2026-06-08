@@ -89,7 +89,7 @@ add_action('rest_api_init', function () {
         'args' => [
             'post_type' => ['default' => 'post', 'sanitize_callback' => 'sanitize_text_field'],
             'target_lang' => ['default' => '', 'sanitize_callback' => 'sanitize_text_field'], // was 'lang' — must match what n8n sends
-            'per_page' => ['default' => -1, 'sanitize_callback' => 'intval'],
+            'per_page' => ['default' => -1, 'sanitize_callback' => function( $value ) { return (int) $value; }],
             'page' => ['default' => 1, 'sanitize_callback' => 'absint'],
         ],
     ]);
@@ -113,7 +113,7 @@ add_action('rest_api_init', function () {
         'args' => [
             'taxonomy' => ['default' => 'category', 'sanitize_callback' => 'sanitize_text_field'],
             'lang' => ['default' => '', 'sanitize_callback' => 'sanitize_text_field'],
-            'per_page' => ['default' => -1, 'sanitize_callback' => 'intval'],
+            'per_page' => ['default' => -1, 'sanitize_callback' => function( $value ) { return (int) $value; }],
             'page' => ['default' => 1, 'sanitize_callback' => 'absint'],
         ],
     ]);
